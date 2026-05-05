@@ -123,3 +123,21 @@ async def list_pages(limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
             offset,
         )
     return [_row_to_dict(r) for r in rows]  # type: ignore[misc]
+
+
+async def search_pages(query: str, limit: int = 50) -> list[dict[str, Any]]:
+    pattern = f"%{query}%"
+    async with acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, url, final_url, status, title, render_mode, fetched_at,
+                   substring(text from 1 for 400) AS text
+            FROM pages
+            WHERE title ILIKE $1 OR text ILIKE $1 OR url ILIKE $1
+            ORDER BY fetched_at DESC
+            LIMIT $2
+            """,
+            pattern,
+            limit,
+        )
+    return [_row_to_dict(r) for r in rows]  # type: ignore[misc]

@@ -74,6 +74,13 @@ async def list_recent(limit: int = 20) -> str:
     return json.dumps(rows, default=str)
 
 
+@mcp.tool()
+async def search(query: str, limit: int = 20) -> str:
+    """Search previously crawled pages by URL, title, or text content."""
+    rows = await db.search_pages(query, limit=limit)
+    return json.dumps(rows, default=str)
+
+
 def main() -> None:
     mcp.run()
 

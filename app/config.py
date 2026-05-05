@@ -11,5 +11,14 @@ class Settings(BaseSettings):
     max_pages_hard_limit: int = 100
     max_depth_hard_limit: int = 5
 
+    # API key required on every request except /health. Empty string = auth disabled (dev only).
+    api_key: str = ""
+    # Comma-separated list of allowed CORS origins. "*" allows all (dev only).
+    allowed_origins: str = "*"
+
+    @property
+    def cors_origins(self) -> list[str]:
+        return [o.strip() for o in self.allowed_origins.split(",") if o.strip()]
+
 
 settings = Settings()

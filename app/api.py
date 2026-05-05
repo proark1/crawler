@@ -4,10 +4,13 @@ import asyncio
 from contextlib import asynccontextmanager
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, HttpUrl
 
 from . import db
+from .auth import require_api_key
+from .config import settings
 from .crawler import close_browser, crawl_one, crawl_site
 
 
@@ -52,6 +55,14 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Crawler", version="0.1.0", lifespan=lifespan)
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "X-API-Key"],
+)
+
 
 @app.get("/health")
 async def health() -> dict:
@@ -74,7 +85,7 @@ def _to_page_out(d: dict) -> PageOut:
     )
 
 
-@app.post("/crawl", response_model=CrawlResponse)
+@app.post("/crawl", response_model=CrawlResponse, dependencies=[Depends(require_api_key)])
 async def crawl(req: CrawlRequest) -> CrawlResponse:
     url = str(req.url)
     if req.follow_links:
@@ -99,7 +110,7 @@ async def crawl(req: CrawlRequest) -> CrawlResponse:
     return CrawlResponse(pages=[_to_page_out(p) for p in stored], count=len(stored))
 
 
-@app.get("/pages", response_model=list[PageOut])
+@app.get("/pages", response_model=list[PageOut], dependencies=[Depends(require_api_key)])
 async def list_pages(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
@@ -108,7 +119,24 @@ async def list_pages(
     return [_to_page_out(r) for r in rows]
 
 
-@app.get("/pages/by-url", response_model=PageOut)
+@app.get(
+    "/pages/search",
+    response_model=list[PageOut],
+    dependencies=[Depends(require_api_key)],
+)
+async def search_pages(
+    q: str = Query(..., min_length=1),
+    limit: int = Query(50, ge=1, le=200),
+) -> list[PageOut]:
+    rows = await db.search_pages(q, limit=limit)
+    return [_to_page_out(r) for r in rows]
+
+
+@app.get(
+    "/pages/by-url",
+    response_model=PageOut,
+    dependencies=[Depends(require_api_key)],
+)
 async def get_page_by_url(url: str) -> PageOut:
     row = await db.get_page_by_url(url)
     if row is None:
@@ -117,7 +145,11 @@ async def get_page_by_url(url: str) -> PageOut:
     return _to_page_out(row)
 
 
-@app.get("/pages/{page_id}", response_model=PageOut)
+@app.get(
+    "/pages/{page_id}",
+    response_model=PageOut,
+    dependencies=[Depends(require_api_key)],
+)
 async def get_page(page_id: int) -> PageOut:
     row = await db.get_page_by_id(page_id)
     if row is None:

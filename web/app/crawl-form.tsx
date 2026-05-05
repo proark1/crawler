@@ -57,34 +57,43 @@ export default function CrawlForm() {
     }
   }
 
+  const inputBase =
+    "w-full rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm text-neutral-900 placeholder:text-neutral-400 focus:border-neutral-300 focus:outline-none focus:ring-2 focus:ring-neutral-200";
+
   return (
     <div className="space-y-6">
-      <form onSubmit={onSubmit} className="space-y-4">
-        <input
-          type="url"
-          required
-          placeholder="https://example.com"
-          value={url}
-          onChange={(e) => setUrl(e.target.value)}
-          className="w-full rounded-md border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-900 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-neutral-500"
-        />
+      <form
+        onSubmit={onSubmit}
+        className="space-y-5 rounded-xl border border-neutral-200 bg-white p-6 shadow-[0_1px_2px_rgba(15,23,42,0.04)]"
+      >
+        <label className="block">
+          <span className="mb-1.5 block text-xs font-medium text-neutral-600">URL</span>
+          <input
+            type="url"
+            required
+            placeholder="https://example.com"
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+            className={inputBase}
+          />
+        </label>
 
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-sm">
-          <label className="flex flex-col gap-1">
-            <span className="text-neutral-600 dark:text-neutral-400">Render</span>
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+          <label className="block">
+            <span className="mb-1.5 block text-xs font-medium text-neutral-600">Render</span>
             <select
               value={render}
               onChange={(e) => setRender(e.target.value as typeof render)}
-              className="rounded-md border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-900 px-2 py-1.5"
+              className={inputBase}
             >
-              <option value="auto">auto (static, JS fallback)</option>
-              <option value="static">static only</option>
-              <option value="js">js only</option>
+              <option value="auto">Auto · static, JS fallback</option>
+              <option value="static">Static only</option>
+              <option value="js">JS only</option>
             </select>
           </label>
 
-          <label className="flex flex-col gap-1">
-            <span className="text-neutral-600 dark:text-neutral-400">Max depth</span>
+          <label className="block">
+            <span className="mb-1.5 block text-xs font-medium text-neutral-600">Max depth</span>
             <input
               type="number"
               min={0}
@@ -92,12 +101,12 @@ export default function CrawlForm() {
               value={maxDepth}
               onChange={(e) => setMaxDepth(Number(e.target.value))}
               disabled={!followLinks}
-              className="rounded-md border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-900 px-2 py-1.5 disabled:opacity-50"
+              className={`${inputBase} disabled:bg-neutral-50 disabled:text-neutral-400`}
             />
           </label>
 
-          <label className="flex flex-col gap-1">
-            <span className="text-neutral-600 dark:text-neutral-400">Max pages</span>
+          <label className="block">
+            <span className="mb-1.5 block text-xs font-medium text-neutral-600">Max pages</span>
             <input
               type="number"
               min={1}
@@ -105,79 +114,120 @@ export default function CrawlForm() {
               value={maxPages}
               onChange={(e) => setMaxPages(Number(e.target.value))}
               disabled={!followLinks}
-              className="rounded-md border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-900 px-2 py-1.5 disabled:opacity-50"
+              className={`${inputBase} disabled:bg-neutral-50 disabled:text-neutral-400`}
             />
           </label>
         </div>
 
-        <div className="flex flex-wrap gap-4 text-sm">
-          <label className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-5 border-t border-neutral-100 pt-4 text-sm">
+          <label className="inline-flex cursor-pointer items-center gap-2 text-neutral-700">
             <input
               type="checkbox"
               checked={followLinks}
               onChange={(e) => setFollowLinks(e.target.checked)}
+              className="h-4 w-4 rounded border-neutral-300 text-[#0B1739] focus:ring-neutral-300"
             />
             Follow links (BFS)
           </label>
-          <label className="flex items-center gap-2">
+          <label className="inline-flex cursor-pointer items-center gap-2 text-neutral-700">
             <input
               type="checkbox"
               checked={sameHostOnly}
               onChange={(e) => setSameHostOnly(e.target.checked)}
               disabled={!followLinks}
+              className="h-4 w-4 rounded border-neutral-300 text-[#0B1739] focus:ring-neutral-300 disabled:opacity-50"
             />
             Same host only
           </label>
-        </div>
 
-        <button
-          type="submit"
-          disabled={loading || !url}
-          className="rounded-md bg-neutral-900 dark:bg-neutral-100 text-white dark:text-neutral-900 px-4 py-2 text-sm font-medium disabled:opacity-50"
-        >
-          {loading ? "Crawling…" : "Crawl"}
-        </button>
+          <button
+            type="submit"
+            disabled={loading || !url}
+            className="ml-auto inline-flex items-center gap-2 rounded-lg bg-[#0B1739] px-4 py-2 text-sm font-medium text-white shadow-sm transition-opacity hover:opacity-90 disabled:opacity-50"
+          >
+            {loading ? (
+              <>
+                <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none">
+                  <circle cx="12" cy="12" r="9" stroke="currentColor" strokeOpacity="0.25" strokeWidth="3" />
+                  <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+                </svg>
+                Crawling…
+              </>
+            ) : (
+              "Start crawl"
+            )}
+          </button>
+        </div>
       </form>
 
       {error && (
-        <pre className="whitespace-pre-wrap rounded-md border border-red-300 bg-red-50 dark:bg-red-950/40 dark:border-red-800 px-3 py-2 text-sm text-red-800 dark:text-red-200">
+        <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
           {error}
-        </pre>
+        </div>
       )}
 
       {result && (
         <div className="space-y-3">
-          <div className="text-sm text-neutral-600 dark:text-neutral-400">
+          <div className="text-sm text-neutral-500">
             {result.count} page{result.count === 1 ? "" : "s"} crawled
           </div>
-          <ul className="space-y-2">
-            {result.pages.map((p, i) => (
-              <li
-                key={p.id ?? i}
-                className="rounded-md border border-neutral-200 dark:border-neutral-800 px-4 py-3"
-              >
-                <div className="flex items-center gap-2 text-xs text-neutral-500">
-                  <span className="rounded bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 font-mono">
-                    {p.render_mode}
-                  </span>
-                  {p.status && <span>{p.status}</span>}
-                  {p.error && <span className="text-red-600">{p.error}</span>}
-                </div>
-                <div className="mt-1 font-medium truncate">{p.title ?? p.url}</div>
-                <div className="text-xs text-neutral-500 truncate">{p.url}</div>
-                {p.id != null && (
-                  <Link
-                    href={`/pages/${p.id}`}
-                    className="mt-1 inline-block text-xs text-blue-600 dark:text-blue-400 hover:underline"
-                  >
-                    View page →
-                  </Link>
-                )}
-              </li>
-            ))}
-          </ul>
+          <div className="overflow-hidden rounded-xl border border-neutral-200 bg-white">
+            <ResultTable pages={result.pages} />
+          </div>
         </div>
       )}
     </div>
+  );
+}
+
+function ResultTable({ pages }: { pages: Page[] }) {
+  return (
+    <table className="w-full text-sm">
+      <thead>
+        <tr className="border-b border-neutral-100 text-left text-xs font-medium text-neutral-500">
+          <th className="px-5 py-3 font-medium">Name</th>
+          <th className="px-5 py-3 font-medium">Mode</th>
+          <th className="px-5 py-3 font-medium">Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        {pages.map((p, i) => (
+          <tr key={p.id ?? i} className="border-b border-neutral-100 last:border-0 hover:bg-neutral-50">
+            <td className="px-5 py-3">
+              <div className="flex items-center gap-3">
+                <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-indigo-50 text-indigo-500">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4">
+                    <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" />
+                    <path d="M14 3v6h6" />
+                  </svg>
+                </span>
+                <div className="min-w-0">
+                  {p.id != null ? (
+                    <Link href={`/pages/${p.id}`} className="block truncate font-medium text-neutral-900 hover:underline">
+                      {p.title ?? p.url}
+                    </Link>
+                  ) : (
+                    <span className="block truncate font-medium text-neutral-900">{p.title ?? p.url}</span>
+                  )}
+                  <span className="block truncate text-xs text-neutral-500">{p.url}</span>
+                </div>
+              </div>
+            </td>
+            <td className="px-5 py-3">
+              <span className="rounded-md bg-neutral-100 px-2 py-0.5 font-mono text-xs text-neutral-700">
+                {p.render_mode}
+              </span>
+            </td>
+            <td className="px-5 py-3 text-neutral-600">
+              {p.error ? (
+                <span className="text-red-600">{p.error}</span>
+              ) : (
+                <span>{p.status ?? "—"}</span>
+              )}
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
   );
 }

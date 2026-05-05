@@ -1,6 +1,13 @@
 import "server-only";
 
-const BASE = process.env.CRAWLER_API_URL ?? "http://localhost:8000";
+function normalizeBase(raw: string): string {
+  const trimmed = raw.trim().replace(/\/+$/, "");
+  if (!trimmed) return "http://localhost:8000";
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  return `https://${trimmed}`;
+}
+
+const BASE = normalizeBase(process.env.CRAWLER_API_URL ?? "http://localhost:8000");
 const KEY = process.env.CRAWLER_API_KEY ?? "";
 
 export type Page = {

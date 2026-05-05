@@ -1,0 +1,25 @@
+[project]
+name = "crawler"
+version = "0.1.0"
+description = "Minimalistic web crawling service with REST API and MCP server"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "httpx>=0.27",
+    "selectolax>=0.3.21",
+    "trafilatura>=1.12",
+    "playwright>=1.48",
+    "asyncpg>=0.30",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "mcp>=1.0",
+    "tenacity>=9.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]

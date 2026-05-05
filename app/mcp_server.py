@@ -5,6 +5,7 @@ Run locally:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Literal
 
@@ -49,13 +50,11 @@ async def crawl(
     else:
         results = [await crawl_one(url, render=render)]
 
-    out = []
-    for r in results:
-        if store:
-            saved = await db.upsert_page(r)
-            out.append(_strip_html(saved))
-        else:
-            out.append(_strip_html(r))
+    if store:
+        saved_pages = await asyncio.gather(*(db.upsert_page(r) for r in results))
+        out = [_strip_html(p) for p in saved_pages]
+    else:
+        out = [_strip_html(r) for r in results]
     return json.dumps({"count": len(out), "pages": out}, default=str)
 
 

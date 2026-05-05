@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from typing import Literal
 
@@ -7,7 +8,7 @@ from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field, HttpUrl
 
 from . import db
-from .crawler import crawl_one, crawl_site
+from .crawler import close_browser, crawl_one, crawl_site
 
 
 class CrawlRequest(BaseModel):
@@ -42,8 +43,11 @@ class CrawlResponse(BaseModel):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await db.init_pool()
-    yield
-    await db.close_pool()
+    try:
+        yield
+    finally:
+        await close_browser()
+        await db.close_pool()
 
 
 app = FastAPI(title="Crawler", version="0.1.0", lifespan=lifespan)
@@ -84,17 +88,13 @@ async def crawl(req: CrawlRequest) -> CrawlResponse:
     else:
         results = [await crawl_one(url, render=req.render)]
 
-    stored: list[dict] = []
-    for r in results:
-        # Drop heavy raw HTML from response payload, but keep it in DB.
-        if req.store:
-            saved = await db.upsert_page(r)
-            saved.pop("html", None)
-            stored.append(saved)
-        else:
-            r = dict(r)
-            r.pop("html", None)
-            stored.append(r)
+    # Drop heavy raw HTML from response payload, but keep it in DB.
+    if req.store:
+        stored = await asyncio.gather(*(db.upsert_page(r) for r in results))
+    else:
+        stored = [dict(r) for r in results]
+    for s in stored:
+        s.pop("html", None)
 
     return CrawlResponse(pages=[_to_page_out(p) for p in stored], count=len(stored))
 

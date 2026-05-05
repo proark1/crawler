@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 from urllib.parse import urldefrag, urljoin, urlparse
 
 import httpx
@@ -11,7 +11,44 @@ from selectolax.parser import HTMLParser
 
 from .config import settings
 
+if TYPE_CHECKING:
+    from playwright.async_api import Browser, Playwright
+
 RenderMode = Literal["auto", "static", "js"]
+
+_pw: "Playwright | None" = None
+_browser: "Browser | None" = None
+_browser_lock = asyncio.Lock()
+
+
+async def get_browser() -> "Browser":
+    """Lazily start Playwright and launch a single Chromium reused across requests."""
+    global _pw, _browser
+    if _browser is not None and _browser.is_connected():
+        return _browser
+    async with _browser_lock:
+        if _browser is not None and _browser.is_connected():
+            return _browser
+        from playwright.async_api import async_playwright
+
+        _pw = await async_playwright().start()
+        _browser = await _pw.chromium.launch(args=["--no-sandbox"])
+        return _browser
+
+
+async def close_browser() -> None:
+    """Shut down the shared browser. Call on app shutdown."""
+    global _pw, _browser
+    if _browser is not None:
+        try:
+            await _browser.close()
+        finally:
+            _browser = None
+    if _pw is not None:
+        try:
+            await _pw.stop()
+        finally:
+            _pw = None
 
 
 class CrawlResult(dict):
@@ -74,24 +111,21 @@ async def _fetch_static(url: str) -> tuple[int, str, str]:
 
 
 async def _fetch_js(url: str) -> tuple[int, str, str]:
-    from playwright.async_api import async_playwright
-
-    async with async_playwright() as pw:
-        browser = await pw.chromium.launch(args=["--no-sandbox"])
-        try:
-            context = await browser.new_context(user_agent=settings.user_agent)
-            page = await context.new_page()
-            response = await page.goto(
-                url,
-                wait_until="networkidle",
-                timeout=settings.js_render_timeout * 1000,
-            )
-            html = await page.content()
-            status = response.status if response else 200
-            final_url = page.url
-            return status, final_url, html
-        finally:
-            await browser.close()
+    browser = await get_browser()
+    context = await browser.new_context(user_agent=settings.user_agent)
+    try:
+        page = await context.new_page()
+        response = await page.goto(
+            url,
+            wait_until="networkidle",
+            timeout=settings.js_render_timeout * 1000,
+        )
+        html = await page.content()
+        status = response.status if response else 200
+        final_url = page.url
+        return status, final_url, html
+    finally:
+        await context.close()
 
 
 async def crawl_one(url: str, render: RenderMode = "auto") -> CrawlResult:

@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useEffect, useState } from "react";
 
 type Item = { href: string; label: string; icon: React.ReactNode };
 
@@ -31,26 +32,6 @@ const items: Item[] = [
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" className={stroke}>
         <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" />
         <path d="M14 3v6h6" />
-      </svg>
-    ),
-  },
-  {
-    href: "/pages?recent=1",
-    label: "Recent",
-    icon: (
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" className={stroke}>
-        <circle cx="12" cy="12" r="9" />
-        <path d="M12 7v5l3 2" />
-      </svg>
-    ),
-  },
-  {
-    href: "/pages?search=1",
-    label: "Search",
-    icon: (
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" className={stroke}>
-        <circle cx="11" cy="11" r="7" />
-        <path d="m20 20-3.5-3.5" />
       </svg>
     ),
   },
@@ -86,12 +67,52 @@ function NavLink({ item, active }: { item: Item; active: boolean }) {
   );
 }
 
+function IndexStatus() {
+  const [total, setTotal] = useState<number | null>(null);
+  const [ok, setOk] = useState(true);
+
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/stats")
+      .then((r) => r.json())
+      .then((d) => {
+        if (!alive) return;
+        if (d.total == null) setOk(false);
+        else setTotal(d.total);
+      })
+      .catch(() => alive && setOk(false));
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  return (
+    <div className="mt-auto px-3 pb-5 pt-6">
+      <p className="pb-2 text-[11px] font-medium uppercase tracking-wider text-neutral-400">
+        Index
+      </p>
+      <div className="flex items-center gap-2 text-xs text-neutral-600">
+        <span
+          className={`h-2 w-2 rounded-full ${ok ? "bg-emerald-500" : "bg-neutral-300"}`}
+          aria-hidden
+        />
+        {ok ? (
+          <span>
+            {total != null ? total.toLocaleString() : "—"} page{total === 1 ? "" : "s"} stored
+          </span>
+        ) : (
+          <span>Service unreachable</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function Sidebar() {
   const pathname = usePathname() ?? "/";
   const isActive = (href: string) => {
-    const base = href.split("?")[0];
-    if (base === "/") return pathname === "/";
-    return pathname === base || pathname.startsWith(`${base}/`);
+    if (href === "/") return pathname === "/";
+    return pathname === href || pathname.startsWith(`${href}/`);
   };
 
   return (
@@ -100,7 +121,7 @@ export default function Sidebar() {
         <span className="flex h-7 w-7 items-center justify-center rounded-md bg-neutral-100 text-neutral-700">
           {SpiderIcon}
         </span>
-        <span className="text-[15px] font-semibold tracking-tight">crawler.io</span>
+        <span className="text-[15px] font-semibold tracking-tight">Crawler</span>
       </div>
 
       <div className="px-3">
@@ -134,15 +155,7 @@ export default function Sidebar() {
           ))}
         </div>
 
-        <div className="mt-auto px-3 pb-5 pt-6">
-          <p className="pb-2 text-[11px] font-medium uppercase tracking-wider text-neutral-400">
-            Storage
-          </p>
-          <div className="h-1.5 w-full overflow-hidden rounded-full bg-neutral-100">
-            <div className="h-full w-[14%] rounded-full bg-neutral-900" />
-          </div>
-          <p className="mt-2 text-xs text-neutral-500">Local index · synced</p>
-        </div>
+        <IndexStatus />
       </nav>
     </aside>
   );

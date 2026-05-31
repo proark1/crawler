@@ -1,15 +1,40 @@
 import Link from "next/link";
 import { api, type Page } from "@/lib/api";
+import PagesTable, { type Row } from "./pages-table";
 
-type SearchParams = Promise<{ q?: string }>;
+type SearchParams = Promise<{ q?: string; page?: string }>;
+
+const PAGE_SIZE = 50;
 
 export default async function PagesIndex({
   searchParams,
 }: {
   searchParams: SearchParams;
 }) {
-  const { q } = await searchParams;
-  const pages: Page[] = q ? await api.search(q, 100) : await api.list(100);
+  const { q, page } = await searchParams;
+  const pageNum = Math.max(1, Number(page) || 1);
+  const offset = (pageNum - 1) * PAGE_SIZE;
+
+  let pages: Page[];
+  let total: number;
+  if (q) {
+    pages = await api.search(q, 100);
+    total = pages.length;
+  } else {
+    const res = await api.list(PAGE_SIZE, offset);
+    pages = res.pages;
+    total = res.total;
+  }
+
+  const totalPages = q ? 1 : Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const rows: Row[] = pages.map((p) => ({
+    id: p.id,
+    url: p.url,
+    title: p.title,
+    status: p.status,
+    render_mode: p.render_mode,
+    fetched_at: p.fetched_at,
+  }));
 
   return (
     <div className="space-y-6">
@@ -19,22 +44,19 @@ export default async function PagesIndex({
             Pages
           </h1>
           <p className="mt-1 text-sm text-neutral-500">
-            {pages.length} result{pages.length === 1 ? "" : "s"}
-            {q ? ` for "${q}"` : ""}
+            {q ? `${total} result${total === 1 ? "" : "s"} for "${q}"` : `${total} stored`}
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
-          <Link
-            href="/"
-            className="inline-flex items-center gap-1.5 rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm font-medium text-neutral-700 hover:bg-neutral-50"
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4">
-              <path d="M12 5v14M5 12h14" />
-            </svg>
-            New crawl
-          </Link>
-        </div>
+        <Link
+          href="/"
+          className="inline-flex items-center gap-1.5 rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm font-medium text-neutral-700 hover:bg-neutral-50"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4">
+            <path d="M12 5v14M5 12h14" />
+          </svg>
+          New crawl
+        </Link>
       </div>
 
       <form className="flex gap-2">
@@ -61,65 +83,45 @@ export default async function PagesIndex({
         </button>
       </form>
 
-      <div className="overflow-hidden rounded-xl border border-neutral-200 bg-white">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-neutral-100 text-left text-xs font-medium text-neutral-500">
-              <th className="px-5 py-3 font-medium">Name</th>
-              <th className="hidden px-5 py-3 font-medium sm:table-cell">Mode</th>
-              <th className="hidden px-5 py-3 font-medium md:table-cell">Fetched</th>
-              <th className="px-5 py-3 font-medium">Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            {pages.map((p) => (
-              <tr
-                key={p.id ?? p.url}
-                className="border-b border-neutral-100 last:border-0 hover:bg-neutral-50"
-              >
-                <td className="px-5 py-3">
-                  <div className="flex items-center gap-3">
-                    <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-indigo-50 text-indigo-500">
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4">
-                        <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" />
-                        <path d="M14 3v6h6" />
-                      </svg>
-                    </span>
-                    <div className="min-w-0">
-                      {p.id != null ? (
-                        <Link href={`/pages/${p.id}`} className="block truncate font-medium text-neutral-900 hover:underline">
-                          {p.title ?? p.url}
-                        </Link>
-                      ) : (
-                        <span className="block truncate font-medium text-neutral-900">
-                          {p.title ?? p.url}
-                        </span>
-                      )}
-                      <span className="block truncate text-xs text-neutral-500">{p.url}</span>
-                    </div>
-                  </div>
-                </td>
-                <td className="hidden px-5 py-3 sm:table-cell">
-                  <span className="rounded-md bg-neutral-100 px-2 py-0.5 font-mono text-xs text-neutral-700">
-                    {p.render_mode}
-                  </span>
-                </td>
-                <td className="hidden px-5 py-3 text-xs text-neutral-500 md:table-cell">
-                  {p.fetched_at ? new Date(p.fetched_at).toLocaleString() : "—"}
-                </td>
-                <td className="px-5 py-3 text-neutral-600">
-                  {p.status ?? "—"}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        {pages.length === 0 && (
-          <div className="px-5 py-12 text-center text-sm text-neutral-500">
-            Nothing here yet. Start a new crawl to populate this list.
+      <PagesTable pages={rows} />
+
+      {!q && totalPages > 1 && (
+        <div className="flex items-center justify-between text-sm">
+          <span className="text-neutral-500">
+            Page {pageNum} of {totalPages}
+          </span>
+          <div className="flex gap-2">
+            <PageLink page={pageNum - 1} disabled={pageNum <= 1} label="Previous" />
+            <PageLink page={pageNum + 1} disabled={pageNum >= totalPages} label="Next" />
           </div>
-        )}
-      </div>
+        </div>
+      )}
     </div>
+  );
+}
+
+function PageLink({
+  page,
+  disabled,
+  label,
+}: {
+  page: number;
+  disabled: boolean;
+  label: string;
+}) {
+  if (disabled) {
+    return (
+      <span className="cursor-not-allowed rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-1.5 text-neutral-300">
+        {label}
+      </span>
+    );
+  }
+  return (
+    <Link
+      href={`/pages?page=${page}`}
+      className="rounded-lg border border-neutral-200 bg-white px-3 py-1.5 text-neutral-700 hover:bg-neutral-50"
+    >
+      {label}
+    </Link>
   );
 }

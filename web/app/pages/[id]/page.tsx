@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { api } from "@/lib/api";
+import DeletePageButton from "./delete-button";
 
 type Params = Promise<{ id: string }>;
 
@@ -28,17 +29,22 @@ export default async function PageDetail({ params }: { params: Params }) {
           </svg>
           Back to pages
         </Link>
-        <h1 className="mt-3 break-words text-[22px] font-semibold tracking-tight text-neutral-900">
-          {page.title ?? page.url}
-        </h1>
-        <a
-          href={page.final_url ?? page.url}
-          target="_blank"
-          rel="noreferrer"
-          className="mt-1 inline-block break-all text-sm text-indigo-600 hover:underline"
-        >
-          {page.final_url ?? page.url}
-        </a>
+        <div className="mt-3 flex items-start justify-between gap-4">
+          <div className="min-w-0">
+            <h1 className="break-words text-[22px] font-semibold tracking-tight text-neutral-900">
+              {page.title ?? page.url}
+            </h1>
+            <a
+              href={page.final_url ?? page.url}
+              target="_blank"
+              rel="noreferrer"
+              className="mt-1 inline-block break-all text-sm text-indigo-600 hover:underline"
+            >
+              {page.final_url ?? page.url}
+            </a>
+          </div>
+          {page.id != null && <DeletePageButton id={page.id} />}
+        </div>
       </div>
 
       <div className="flex flex-wrap gap-2 text-xs">

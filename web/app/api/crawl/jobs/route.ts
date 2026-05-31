@@ -4,12 +4,12 @@ import { api } from "@/lib/api";
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const result = await api.crawl(body);
-    return NextResponse.json(result);
+    const job = await api.createJob(body);
+    return NextResponse.json(job, { status: 202 });
   } catch (err) {
-    console.error("crawl failed", err);
+    console.error("create job failed", err);
     return NextResponse.json(
-      { error: "Crawl failed. Check the URL and try again." },
+      { error: "Could not start the crawl. Please try again." },
       { status: 502 },
     );
   }

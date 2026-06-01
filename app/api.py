@@ -97,7 +97,7 @@ async def lifespan(app: FastAPI):
         await db.close_pool()
 
 
-app = FastAPI(title="Crawler", version="0.3.0", lifespan=lifespan)
+app = FastAPI(title="Crawler", version="0.4.0", lifespan=lifespan)
 
 app.add_middleware(RateLimitMiddleware)
 app.add_middleware(

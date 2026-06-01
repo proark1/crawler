@@ -371,16 +371,16 @@ def _extract_structured_metadata(tree: HTMLParser, url: str) -> dict:
                 if isinstance(item.get("name"), str):
                     product.setdefault("name", item["name"])
                 brand = item.get("brand")
-                if isinstance(brand, dict) and brand.get("name"):
+                if isinstance(brand, dict) and isinstance(brand.get("name"), str):
                     product.setdefault("brand", brand["name"])
                 elif isinstance(brand, str):
                     product.setdefault("brand", brand)
                 offers = item.get("offers")
                 offer = offers[0] if isinstance(offers, list) and offers else offers
                 if isinstance(offer, dict):
-                    if offer.get("price") is not None:
+                    if isinstance(offer.get("price"), (str, int, float)):
                         product.setdefault("price", str(offer["price"]))
-                    if offer.get("priceCurrency"):
+                    if isinstance(offer.get("priceCurrency"), str):
                         product.setdefault("currency", offer["priceCurrency"])
                     if isinstance(offer.get("availability"), str):
                         product.setdefault("availability", offer["availability"].rsplit("/", 1)[-1])

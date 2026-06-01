@@ -26,6 +26,8 @@ impersonate = ["curl_cffi>=0.7"]
 stealth = ["patchright>=1.0"]
 # PDF text extraction.
 pdf = ["pypdf>=4.0"]
+# Language detection (pure-Python).
+lang = ["py3langid>=0.3"]
 sentry = ["sentry-sdk>=2.0"]
 dev = [
     "pytest>=8.0",

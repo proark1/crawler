@@ -22,7 +22,7 @@ from tenacity import (
     wait_exponential,
 )
 
-from . import antibot, concurrency, httpclient, observability, pdfextract, solver, ssrf
+from . import antibot, concurrency, httpclient, observability, pdfextract, solver, ssrf, textmeta
 from .antibot import Tier
 from .config import settings
 
@@ -443,6 +443,18 @@ def _extract_sync(html: str, url: str) -> Extraction:
                 out.markdown = md
         except Exception:  # noqa: BLE001 -- markdown is best-effort
             pass
+
+    # Reading stats (always) and best-effort language detection (when the HTML
+    # didn't declare one).
+    if out.text:
+        words, minutes = textmeta.reading_stats(out.text)
+        out.metadata["word_count"] = words
+        out.metadata["reading_time_min"] = minutes
+        if settings.detect_language and not out.metadata.get("language"):
+            lang = textmeta.detect_language(out.text)
+            if lang:
+                out.metadata["language"] = lang
+                out.metadata["language_detected"] = True
 
     return out
 
@@ -1089,6 +1101,14 @@ async def _crawl_escalating(
                 result["markdown"] = html
                 result["content_hash"] = _content_hash(html)
                 result["metadata"]["content_type"] = content_type
+                words, minutes = textmeta.reading_stats(html)
+                result["metadata"]["word_count"] = words
+                result["metadata"]["reading_time_min"] = minutes
+                if settings.detect_language:
+                    lang = textmeta.detect_language(html)
+                    if lang:
+                        result["metadata"]["language"] = lang
+                        result["metadata"]["language_detected"] = True
                 result["render_mode"] = "pdf"
                 if settings.antibot_enabled:
                     antibot.profiles.record_success(url, tier)

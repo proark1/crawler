@@ -37,7 +37,9 @@ Beyond title/text/links, each page yields a Markdown rendering plus structured
 metadata: OpenGraph, JSON-LD (incl. Article and Product fields — price,
 currency, availability, brand), canonical URL, language, author, and publish
 date. **PDF** responses are text-extracted too (`render_mode: pdf`, needs the
-`[pdf]` extra). Site crawls seed discovery from the site's **sitemap(s)** (robots `Sitemap:`
+`[pdf]` extra). Every page also gets **word count / reading time**, and
+best-effort **language detection** (`[lang]` extra) when the HTML doesn't declare
+one. Site crawls seed discovery from the site's **sitemap(s)** (robots `Sitemap:`
 lines or `/sitemap.xml`, following sitemap-index files) in addition to in-page
 links, and dedupe via `rel=canonical`. The dashboard's **Domains** view
 shows which engine tier works per host and where bot protection was hit.

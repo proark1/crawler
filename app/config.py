@@ -87,6 +87,7 @@ class Settings(BaseSettings):
     extract_metadata: bool = True  # OpenGraph / JSON-LD / canonical / language
     emit_markdown: bool = True  # include a Markdown rendering of the main content
     extract_pdf: bool = True  # extract text from PDF responses (needs the [pdf] extra)
+    detect_language: bool = True  # detect language from text (needs the [lang] extra)
 
     # Discovery: seed follow-link crawls from sitemap.xml / robots Sitemap: lines.
     use_sitemap: bool = True

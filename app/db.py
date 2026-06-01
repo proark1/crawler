@@ -161,6 +161,22 @@ async def count_pages() -> int:
         return await conn.fetchval("SELECT count(*) FROM pages") or 0
 
 
+async def stats() -> dict[str, int]:
+    """Aggregate counts for the dashboard: total, errored, and bot-blocked pages."""
+    async with acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT count(*) AS total, "
+            "count(*) FILTER (WHERE error IS NOT NULL) AS errors, "
+            "count(*) FILTER (WHERE metadata ? 'block') AS blocked "
+            "FROM pages"
+        )
+    return {
+        "total": row["total"] or 0,
+        "errors": row["errors"] or 0,
+        "blocked": row["blocked"] or 0,
+    }
+
+
 async def list_pages(limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
     async with acquire() as conn:
         rows = await conn.fetch(

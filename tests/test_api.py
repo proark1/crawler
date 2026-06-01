@@ -197,6 +197,18 @@ async def test_list_jobs(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_stats_endpoint(monkeypatch):
+    async def fake_stats():
+        return {"total": 10, "errors": 2, "blocked": 3}
+
+    monkeypatch.setattr(db, "stats", fake_stats)
+    async with _client() as c:
+        r = await c.get("/stats")
+    assert r.status_code == 200
+    assert r.json() == {"total": 10, "errors": 2, "blocked": 3}
+
+
+@pytest.mark.asyncio
 async def test_list_domains(monkeypatch):
     from app import antibot
     from app.antibot import Tier

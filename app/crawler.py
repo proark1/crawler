@@ -12,7 +12,7 @@ import trafilatura
 from selectolax.parser import HTMLParser
 from tenacity import (
     retry,
-    retry_if_exception_type,
+    retry_if_exception,
     stop_after_attempt,
     wait_exponential,
 )
@@ -203,7 +203,7 @@ async def _fetch_static(url: str) -> tuple[int, str, str | None, str | None]:
     timeout = httpx.Timeout(settings.request_timeout)
 
     @retry(
-        retry=retry_if_exception_type((httpx.TransportError, httpx.TimeoutException)),
+        retry=retry_if_exception(_is_transient),
         stop=stop_after_attempt(settings.max_retries + 1),
         wait=wait_exponential(multiplier=0.5, max=8),
         reraise=True,
@@ -240,24 +240,21 @@ async def _fetch_js(url: str) -> tuple[int, str, str]:
     try:
         await _respect_delay(url)
         page = await context.new_page()
-        status = 200
+        # Let goto failures (DNS, connection, navigation timeout) propagate so the
+        # caller records a real error instead of a fake 200.
+        response = await page.goto(
+            url,
+            wait_until="domcontentloaded",
+            timeout=settings.js_render_timeout * 1000,
+        )
+        status = response.status if response is not None else 200
+        # Give client-side rendering a brief moment to settle, but never block
+        # forever waiting for networkidle on pages that never go idle.
         try:
-            response = await page.goto(
-                url,
-                wait_until="domcontentloaded",
-                timeout=settings.js_render_timeout * 1000,
+            await page.wait_for_load_state(
+                "networkidle", timeout=min(5000, settings.js_render_timeout * 1000)
             )
-            if response is not None:
-                status = response.status
-            # Give client-side rendering a brief moment to settle, but never block
-            # forever waiting for networkidle on pages that never go idle.
-            try:
-                await page.wait_for_load_state(
-                    "networkidle", timeout=min(5000, settings.js_render_timeout * 1000)
-                )
-            except Exception:  # noqa: BLE001 -- networkidle is best-effort
-                pass
-        except Exception:  # noqa: BLE001 -- still try to read whatever rendered
+        except Exception:  # noqa: BLE001 -- networkidle is best-effort
             pass
         html = await page.content()
         return status, page.url, html
@@ -404,11 +401,14 @@ async def crawl_site(
                 queue.task_done()
 
     tasks = [asyncio.create_task(worker()) for _ in range(max(1, workers))]
-    # queue.join() unblocks exactly when every enqueued URL has been processed,
-    # which is race-free regardless of how links fan out across workers.
-    await queue.join()
-    for t in tasks:
-        t.cancel()
-    await asyncio.gather(*tasks, return_exceptions=True)
+    try:
+        # queue.join() unblocks exactly when every enqueued URL has been processed,
+        # which is race-free regardless of how links fan out across workers.
+        await queue.join()
+    finally:
+        # Guarantee workers are torn down even if we're cancelled mid-crawl.
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     return results[:max_pages]

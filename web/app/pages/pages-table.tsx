@@ -84,7 +84,7 @@ export default function PagesTable({ pages }: { pages: Row[] }) {
                     {p.render_mode}
                   </span>
                 </td>
-                <td className="hidden px-5 py-3 text-xs text-neutral-500 md:table-cell">
+                <td suppressHydrationWarning className="hidden px-5 py-3 text-xs text-neutral-500 md:table-cell">
                   {p.fetched_at ? new Date(p.fetched_at).toLocaleString() : "—"}
                 </td>
                 <td className="px-5 py-3 text-neutral-600">{p.status ?? "—"}</td>

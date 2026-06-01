@@ -5,7 +5,7 @@ import asyncio
 import httpx
 import pytest
 
-from app import api, db
+from app import api, crawler, db
 from app.crawler import CrawlResult
 
 
@@ -51,7 +51,7 @@ async def test_crawl_single_page(monkeypatch):
         page["id"] = 1
         return page
 
-    monkeypatch.setattr(api, "crawl_one", fake_crawl_one)
+    monkeypatch.setattr(crawler, "crawl_one", fake_crawl_one)
     monkeypatch.setattr(db, "upsert_page", fake_upsert)
 
     async with _client() as c:
@@ -77,7 +77,7 @@ async def test_crawl_job_lifecycle(monkeypatch):
         page["id"] = 7
         return page
 
-    monkeypatch.setattr(api, "crawl_one", fake_crawl_one)
+    monkeypatch.setattr(crawler, "crawl_one", fake_crawl_one)
     monkeypatch.setattr(db, "upsert_page", fake_upsert)
 
     async with _client() as c:

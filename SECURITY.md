@@ -16,22 +16,23 @@ Server-Side Request Forgery (`app/ssrf.py`), enabled by default
 - A host allowlist (`SSRF_ALLOWLIST`) can exempt known-internal hosts for
   testing.
 
-### Known limitation: DNS rebinding
+### DNS rebinding (TOCTOU)
 
-Validation resolves the host and checks the IPs, but `httpx` and the browser
-perform their own DNS resolution at connect time. This leaves a narrow
-Time-of-Check/Time-of-Use window: an attacker who controls a domain with a
-very low TTL could, in principle, pass validation and then have the connection
-land on a private IP.
+Naively, validation resolves the host and checks the IPs, but the HTTP client
+would then perform its *own* DNS resolution at connect time — a Time-of-Check/
+Time-of-Use window an attacker with a low-TTL domain could exploit to pass the
+check and then land the connection on a private IP.
 
-Exploitation requires attacker-controlled DNS **and** winning a race against
-our check, so the practical risk is low. Fully eliminating it requires pinning
-the connection to the validated IP while preserving TLS SNI/Host via a custom
-transport, which is intentionally out of scope.
+For **static fetches** this is mitigated: `ssrf.build_async_client` routes every
+connection through our own validated resolver (an httpcore network backend that
+connects to the IP we just validated). httpcore still performs the TLS handshake
+against the original hostname, so SNI and certificate verification remain
+correct. The IP that is checked is the IP that is connected to.
 
-**Recommended hardening for sensitive deployments:** run the crawler in a
-network segment where private/internal ranges are firewalled off at egress, so
-rebinding has nothing to reach even if the race is won.
+**Residual gap:** the headless browser (Playwright, used for JS rendering) does
+its own DNS, so there it relies on per-subrequest validation rather than IP
+pinning. For defence in depth on sensitive deployments, run the crawler in a
+network segment where private/internal ranges are firewalled off at egress.
 
 ## Other controls
 

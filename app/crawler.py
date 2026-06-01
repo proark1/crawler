@@ -360,7 +360,7 @@ async def _get_robots(url: str) -> RobotFileParser | None:
         robots_url = f"{origin}/robots.txt"
         try:
             await ssrf.assert_url_allowed(robots_url)
-            async with httpx.AsyncClient(
+            async with ssrf.build_async_client(
                 follow_redirects=True,
                 timeout=httpx.Timeout(min(settings.request_timeout, 10.0)),
                 headers={"User-Agent": settings.user_agent},
@@ -445,7 +445,7 @@ async def _fetch_static(url: str, cached: dict | None = None) -> StaticFetch:
         reraise=True,
     )
     async def _do() -> StaticFetch:
-        async with httpx.AsyncClient(
+        async with ssrf.build_async_client(
             follow_redirects=False, headers=headers, timeout=timeout
         ) as client:
             current = url

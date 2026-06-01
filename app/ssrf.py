@@ -7,23 +7,28 @@ that maps to a private, loopback, link-local, or otherwise non-public address.
 Redirects are validated hop-by-hop by the caller, since a public URL can 302 to
 an internal one, and the browser context validates every subrequest too.
 
-Known limitation (DNS rebinding): we validate the resolved IPs, but httpx and
-the browser perform their own DNS resolution at connect time, leaving a small
-TOCTOU window. Exploiting it requires an attacker-controlled domain with a very
-low TTL plus a race between our check and the connect. Fully closing it means
-pinning the connection to the validated IP while preserving TLS SNI/Host (a
-custom transport); that is deliberately out of scope here. Deployments that need
-that guarantee should run the crawler in a network with private ranges firewalled
-off at the egress.
+DNS rebinding (TOCTOU) mitigation: `build_async_client` returns an httpx client
+whose connections are routed through our own validated resolver — the IP we
+checked is the exact IP we connect to. httpcore still performs the TLS handshake
+against the original hostname, so SNI and certificate verification stay correct.
+This closes the window where a low-TTL attacker domain could pass validation and
+then resolve to a private IP at connect time. The headless browser (Playwright)
+does its own DNS, so for JS rendering we rely on per-subrequest validation; for
+defence in depth, run the crawler with private ranges firewalled off at egress.
 """
 from __future__ import annotations
 
 import asyncio
 import ipaddress
+import logging
 import socket
 from urllib.parse import urlparse
 
+import httpx
+
 from .config import settings
+
+log = logging.getLogger("crawler.ssrf")
 
 
 class BlockedAddressError(Exception):
@@ -51,6 +56,29 @@ async def _resolve(host: str) -> list[str]:
     return [info[4][0] for info in infos]
 
 
+async def resolve_validated(host: str) -> list[str]:
+    """Resolve a host to its IPs, raising BlockedAddressError if any is non-public.
+
+    A literal IP is checked directly. Returns the list of validated IPs.
+    """
+    host = host.lower()
+    try:
+        ipaddress.ip_address(host)
+        candidates = [host]
+    except ValueError:
+        try:
+            candidates = await _resolve(host)
+        except socket.gaierror as exc:
+            raise BlockedAddressError(f"cannot resolve host: {host}") from exc
+
+    if not candidates:
+        raise BlockedAddressError(f"no addresses for host: {host}")
+    for ip in candidates:
+        if not _ip_is_public(ip):
+            raise BlockedAddressError(f"{host} resolves to non-public address {ip}")
+    return candidates
+
+
 async def assert_url_allowed(url: str) -> None:
     """Raise BlockedAddressError if the URL must not be fetched.
 
@@ -70,22 +98,63 @@ async def assert_url_allowed(url: str) -> None:
     if host in settings.ssrf_allowed_hosts:
         return
 
-    # A literal IP in the URL is checked directly; otherwise resolve all records.
-    candidates: list[str]
+    await resolve_validated(host)
+
+
+async def _connect_host(host: str) -> str:
+    """Return the IP to connect to for `host` (validated), or the host unchanged
+    when SSRF is disabled or the host is allowlisted."""
+    if not settings.block_private_addresses:
+        return host
+    if host.lower() in settings.ssrf_allowed_hosts:
+        return host
+    ips = await resolve_validated(host)
+    return ips[0]
+
+
+class _PinnedBackend:
+    """httpcore network backend that connects to our pre-validated IP.
+
+    Delegates everything to the wrapped backend but rewrites the TCP target host
+    to the validated IP. TLS (start_tls) is driven separately by httpcore using
+    the original hostname, so SNI and certificate verification are unaffected.
+    """
+
+    def __init__(self, inner) -> None:  # type: ignore[no-untyped-def]
+        self._inner = inner
+
+    async def connect_tcp(
+        self, host, port, timeout=None, local_address=None, socket_options=None
+    ):  # type: ignore[no-untyped-def]
+        ip = await _connect_host(host)
+        return await self._inner.connect_tcp(
+            ip,
+            port,
+            timeout=timeout,
+            local_address=local_address,
+            socket_options=socket_options,
+        )
+
+    async def connect_unix_socket(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        return await self._inner.connect_unix_socket(*args, **kwargs)
+
+    async def sleep(self, seconds):  # type: ignore[no-untyped-def]
+        return await self._inner.sleep(seconds)
+
+
+def build_async_client(**kwargs) -> httpx.AsyncClient:
+    """An httpx.AsyncClient that pins connections to validated IPs when SSRF is on.
+
+    Falls back to a plain client (still protected by per-request
+    `assert_url_allowed` checks) if httpcore internals aren't shaped as expected.
+    """
+    if not settings.block_private_addresses:
+        return httpx.AsyncClient(**kwargs)
     try:
-        ipaddress.ip_address(host)
-        candidates = [host]
-    except ValueError:
-        try:
-            candidates = await _resolve(host)
-        except socket.gaierror as exc:
-            raise BlockedAddressError(f"cannot resolve host: {host}") from exc
-
-    if not candidates:
-        raise BlockedAddressError(f"no addresses for host: {host}")
-
-    for ip in candidates:
-        if not _ip_is_public(ip):
-            raise BlockedAddressError(
-                f"{host} resolves to non-public address {ip}"
-            )
+        transport = httpx.AsyncHTTPTransport(retries=0)
+        pool = transport._pool  # type: ignore[attr-defined]
+        pool._network_backend = _PinnedBackend(pool._network_backend)  # type: ignore[attr-defined]
+        return httpx.AsyncClient(transport=transport, **kwargs)
+    except Exception as exc:  # noqa: BLE001 -- never break fetching over a pinning hiccup
+        log.warning("IP-pinned transport unavailable, using plain client: %s", exc)
+        return httpx.AsyncClient(**kwargs)

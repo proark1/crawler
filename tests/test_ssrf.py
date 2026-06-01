@@ -67,3 +67,46 @@ async def test_allowlist_bypasses_check():
 async def test_disabled_is_noop(monkeypatch):
     monkeypatch.setattr(settings, "block_private_addresses", False)
     await ssrf.assert_url_allowed("http://127.0.0.1/")  # no raise when disabled
+
+
+@pytest.mark.asyncio
+async def test_connect_host_pins_to_validated_ip(monkeypatch):
+    async def fake_resolve(host):
+        return ["93.184.216.34"]
+
+    monkeypatch.setattr(ssrf, "_resolve", fake_resolve)
+    # Hostname is replaced by the validated public IP for the actual connection.
+    assert await ssrf._connect_host("example.com") == "93.184.216.34"
+
+
+@pytest.mark.asyncio
+async def test_connect_host_rejects_rebind_to_private(monkeypatch):
+    async def fake_resolve(host):
+        return ["10.0.0.1"]
+
+    monkeypatch.setattr(ssrf, "_resolve", fake_resolve)
+    with pytest.raises(ssrf.BlockedAddressError):
+        await ssrf._connect_host("rebind.example")
+
+
+@pytest.mark.asyncio
+async def test_connect_host_passthrough_for_allowlist_and_disabled(monkeypatch):
+    monkeypatch.setattr(settings, "ssrf_allowlist", "internal.local")
+    assert await ssrf._connect_host("internal.local") == "internal.local"
+    monkeypatch.setattr(settings, "block_private_addresses", False)
+    assert await ssrf._connect_host("anything") == "anything"
+
+
+def test_build_async_client_returns_client():
+    import httpx
+
+    client = ssrf.build_async_client()
+    assert isinstance(client, httpx.AsyncClient)
+
+
+def test_build_async_client_plain_when_disabled(monkeypatch):
+    monkeypatch.setattr(settings, "block_private_addresses", False)
+    client = ssrf.build_async_client()
+    import httpx
+
+    assert isinstance(client, httpx.AsyncClient)

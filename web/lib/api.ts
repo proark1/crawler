@@ -39,6 +39,16 @@ export type Job = {
   error: string | null;
 };
 
+export type JobSummary = {
+  id: string;
+  status: "pending" | "running" | "done" | "error";
+  progress: number;
+  total: number | null;
+  error: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
 type Init = Omit<RequestInit, "headers"> & {
   headers?: Record<string, string>;
   cache?: RequestCache;
@@ -77,6 +87,9 @@ export const api = {
   createJob: (body: Record<string, unknown>) =>
     apiFetch<Job>("/crawl/jobs", { method: "POST", body: JSON.stringify(body) }),
   getJob: (id: string) => apiFetch<Job>(`/crawl/jobs/${encodeURIComponent(id)}`),
+  listJobs: (limit = 50, offset = 0) =>
+    apiFetch<JobSummary[]>(`/crawl/jobs?limit=${limit}&offset=${offset}`),
+  streamJob: (id: string) => rawFetch(`/crawl/jobs/${encodeURIComponent(id)}/stream`),
   list: async (limit = 50, offset = 0): Promise<{ pages: Page[]; total: number }> => {
     const res = await rawFetch(`/pages?limit=${limit}&offset=${offset}`);
     const total = Number(res.headers.get("X-Total-Count") ?? "0");
@@ -88,6 +101,8 @@ export const api = {
   get: (id: number) => apiFetch<Page>(`/pages/${id}`),
   remove: (id: number) =>
     rawFetch(`/pages/${id}`, { method: "DELETE" }).then(() => undefined),
+  exportStream: (format: "json" | "csv" | "md") =>
+    rawFetch(`/pages/export?format=${format}`),
   stats: async (): Promise<{ total: number }> => {
     const res = await rawFetch(`/pages?limit=1&offset=0`);
     await res.text();

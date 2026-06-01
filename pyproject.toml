@@ -1,7 +1,7 @@
 [project]
 name = "crawler"
-version = "0.1.0"
-description = "Minimalistic web crawling service with REST API and MCP server"
+version = "0.3.0"
+description = "Fast web crawling service with REST API, MCP server, and dashboard"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115",
@@ -15,9 +15,11 @@ dependencies = [
     "pydantic-settings>=2.6",
     "mcp>=1.0",
     "tenacity>=9.0",
+    "prometheus-client>=0.20",
 ]
 
 [project.optional-dependencies]
+sentry = ["sentry-sdk>=2.0"]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",

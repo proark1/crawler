@@ -13,6 +13,17 @@
   --accent: 99 102 241;
 }
 
+html.dark {
+  --bg: 13 17 23;
+  --surface: 22 27 34;
+  --border: 48 54 61;
+  --text: 230 237 243;
+  --muted: 139 148 158;
+  --primary: 56 99 232;
+  --primary-text: 255 255 255;
+  --accent: 129 140 248;
+}
+
 html,
 body {
   height: 100%;

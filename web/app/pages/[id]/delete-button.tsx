@@ -2,9 +2,11 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { useToast } from "../../components/toast";
 
 export default function DeletePageButton({ id }: { id: number }) {
   const router = useRouter();
+  const { notify } = useToast();
   const [busy, setBusy] = useState(false);
 
   async function onClick() {
@@ -13,11 +15,12 @@ export default function DeletePageButton({ id }: { id: number }) {
     try {
       const res = await fetch(`/api/pages/${id}`, { method: "DELETE" });
       if (!res.ok && res.status !== 204) throw new Error("Delete failed");
+      notify("Page deleted", "success");
       router.push("/pages");
       router.refresh();
     } catch {
       setBusy(false);
-      window.alert("Could not delete that page. Try again.");
+      notify("Could not delete that page. Try again.", "error");
     }
   }
 
@@ -26,7 +29,7 @@ export default function DeletePageButton({ id }: { id: number }) {
       type="button"
       onClick={onClick}
       disabled={busy}
-      className="inline-flex items-center gap-1.5 rounded-lg border border-neutral-200 bg-white px-3 py-1.5 text-sm font-medium text-neutral-700 hover:border-red-200 hover:bg-red-50 hover:text-red-600 disabled:opacity-50"
+      className="inline-flex items-center gap-1.5 rounded-lg border border-neutral-200 bg-white px-3 py-1.5 text-sm font-medium text-neutral-700 hover:border-red-200 hover:bg-red-50 hover:text-red-600 disabled:opacity-50 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-300 dark:hover:bg-red-950"
     >
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4">
         <path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -9,50 +10,15 @@ from typing import Any
 import asyncpg
 
 from .config import settings
+from .migrations import apply_migrations
 
 _pool: asyncpg.Pool | None = None
 
-
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS pages (
-    id           BIGSERIAL PRIMARY KEY,
-    url          TEXT NOT NULL,
-    final_url    TEXT,
-    status       INTEGER,
-    title        TEXT,
-    text         TEXT,
-    html         TEXT,
-    links        JSONB NOT NULL DEFAULT '[]'::jsonb,
-    metadata     JSONB NOT NULL DEFAULT '{}'::jsonb,
-    render_mode  TEXT NOT NULL,
-    error        TEXT,
-    fetched_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    search_tsv   TSVECTOR,
-    UNIQUE (url)
-);
-
-CREATE INDEX IF NOT EXISTS pages_fetched_at_idx ON pages (fetched_at DESC);
-
--- Add the search column on pre-existing tables that lack it.
-ALTER TABLE pages ADD COLUMN IF NOT EXISTS search_tsv TSVECTOR;
-
--- Full-text search index over title + text (weighted), maintained by trigger.
-CREATE INDEX IF NOT EXISTS pages_search_tsv_idx ON pages USING GIN (search_tsv);
-
-CREATE OR REPLACE FUNCTION pages_search_tsv_update() RETURNS trigger AS $$
-BEGIN
-    NEW.search_tsv :=
-        setweight(to_tsvector('english', coalesce(NEW.title, '')), 'A') ||
-        setweight(to_tsvector('english', coalesce(NEW.text, '')), 'B');
-    RETURN NEW;
-END
-$$ LANGUAGE plpgsql;
-
-DROP TRIGGER IF EXISTS pages_search_tsv_trigger ON pages;
-CREATE TRIGGER pages_search_tsv_trigger
-    BEFORE INSERT OR UPDATE OF title, text ON pages
-    FOR EACH ROW EXECUTE FUNCTION pages_search_tsv_update();
-"""
+# Columns returned to callers (everything except the compressed HTML blob and tsvector).
+_PAGE_COLS = (
+    "id, url, final_url, status, title, text, markdown, links, metadata, "
+    "render_mode, error, etag, last_modified, content_hash, fetched_at"
+)
 
 
 async def init_pool() -> asyncpg.Pool:
@@ -60,7 +26,7 @@ async def init_pool() -> asyncpg.Pool:
     if _pool is None:
         _pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=10)
         async with _pool.acquire() as conn:
-            await conn.execute(SCHEMA)
+            await apply_migrations(conn)
     return _pool
 
 
@@ -88,63 +54,100 @@ async def acquire() -> AsyncIterator[asyncpg.Connection]:
         yield conn
 
 
+def _gz(html: str | None) -> bytes | None:
+    if not html or not settings.store_html:
+        return None
+    return gzip.compress(html.encode("utf-8", "replace"))
+
+
 def _row_to_dict(row: asyncpg.Record | None) -> dict[str, Any] | None:
     if row is None:
         return None
     d = dict(row)
     d.pop("search_tsv", None)
-    for k in ("links", "metadata"):
+    html_gz = d.pop("html_gz", None)
+    if html_gz is not None:
+        d["html"] = gzip.decompress(html_gz).decode("utf-8", "replace")
+    for k in ("links", "metadata", "pages", "request"):
         v = d.get(k)
         if isinstance(v, str):
             d[k] = json.loads(v)
-    if isinstance(d.get("fetched_at"), datetime):
-        d["fetched_at"] = d["fetched_at"].isoformat()
+    for k in ("fetched_at", "created_at", "updated_at"):
+        if isinstance(d.get(k), datetime):
+            d[k] = d[k].isoformat()
     return d
+
+
+# --------------------------------------------------------------------------- #
+# Pages                                                                       #
+# --------------------------------------------------------------------------- #
 
 
 async def upsert_page(page: dict[str, Any]) -> dict[str, Any]:
     async with acquire() as conn:
         row = await conn.fetchrow(
-            """
-            INSERT INTO pages (url, final_url, status, title, text, html, links, metadata, render_mode, error)
-            VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9, $10)
+            f"""
+            INSERT INTO pages (url, final_url, status, title, text, markdown, html_gz,
+                               links, metadata, render_mode, error, etag, last_modified,
+                               content_hash)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11, $12, $13, $14)
             ON CONFLICT (url) DO UPDATE SET
-                final_url   = EXCLUDED.final_url,
-                status      = EXCLUDED.status,
-                title       = EXCLUDED.title,
-                text        = EXCLUDED.text,
-                html        = EXCLUDED.html,
-                links       = EXCLUDED.links,
-                metadata    = EXCLUDED.metadata,
-                render_mode = EXCLUDED.render_mode,
-                error       = EXCLUDED.error,
-                fetched_at  = NOW()
-            RETURNING id, url, final_url, status, title, text, links, metadata, render_mode, error, fetched_at
+                final_url     = EXCLUDED.final_url,
+                status        = EXCLUDED.status,
+                title         = EXCLUDED.title,
+                text          = EXCLUDED.text,
+                markdown      = EXCLUDED.markdown,
+                html_gz       = EXCLUDED.html_gz,
+                links         = EXCLUDED.links,
+                metadata      = EXCLUDED.metadata,
+                render_mode   = EXCLUDED.render_mode,
+                error         = EXCLUDED.error,
+                etag          = EXCLUDED.etag,
+                last_modified = EXCLUDED.last_modified,
+                content_hash  = EXCLUDED.content_hash,
+                fetched_at    = NOW()
+            RETURNING {_PAGE_COLS}
             """,
             page["url"],
             page.get("final_url"),
             page.get("status"),
             page.get("title"),
             page.get("text"),
-            page.get("html"),
+            page.get("markdown"),
+            _gz(page.get("html")),
             json.dumps(page.get("links", [])),
             json.dumps(page.get("metadata", {})),
             page["render_mode"],
             page.get("error"),
+            page.get("etag"),
+            page.get("last_modified"),
+            page.get("content_hash"),
         )
     return _row_to_dict(row)  # type: ignore[return-value]
 
 
 async def get_page_by_url(url: str) -> dict[str, Any] | None:
     async with acquire() as conn:
-        row = await conn.fetchrow("SELECT * FROM pages WHERE url = $1", url)
+        row = await conn.fetchrow(
+            f"SELECT {_PAGE_COLS} FROM pages WHERE url = $1", url
+        )
     return _row_to_dict(row)
 
 
 async def get_page_by_id(page_id: int) -> dict[str, Any] | None:
     async with acquire() as conn:
-        row = await conn.fetchrow("SELECT * FROM pages WHERE id = $1", page_id)
+        row = await conn.fetchrow(
+            f"SELECT {_PAGE_COLS} FROM pages WHERE id = $1", page_id
+        )
     return _row_to_dict(row)
+
+
+async def get_page_html(page_id: int) -> str | None:
+    async with acquire() as conn:
+        blob = await conn.fetchval("SELECT html_gz FROM pages WHERE id = $1", page_id)
+    if blob is None:
+        return None
+    return gzip.decompress(blob).decode("utf-8", "replace")
 
 
 async def delete_page(page_id: int) -> bool:
@@ -167,6 +170,22 @@ async def list_pages(limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
             offset,
         )
     return [_row_to_dict(r) for r in rows]  # type: ignore[misc]
+
+
+async def iter_all_pages() -> AsyncIterator[dict[str, Any]]:
+    """Stream every page (lightweight columns) for export via a server-side cursor.
+
+    A cursor avoids the O(N^2) cost of deep LIMIT/OFFSET pagination and keeps
+    memory flat regardless of table size.
+    """
+    async with acquire() as conn, conn.transaction():
+        async for row in conn.cursor(
+            "SELECT id, url, final_url, status, title, render_mode, fetched_at "
+            "FROM pages ORDER BY fetched_at DESC"
+        ):
+            d = _row_to_dict(row)
+            if d is not None:
+                yield d
 
 
 async def search_pages(query: str, limit: int = 50) -> list[dict[str, Any]]:
@@ -194,3 +213,54 @@ async def search_pages(query: str, limit: int = 50) -> list[dict[str, Any]]:
             d.pop("rank", None)
             out.append(d)
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Jobs (durable mirror of the in-memory registry)                             #
+# --------------------------------------------------------------------------- #
+
+
+async def upsert_job(job: dict[str, Any]) -> None:
+    async with acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO crawl_jobs (id, status, progress, total, request, pages, error, webhook_url, updated_at)
+            VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8, NOW())
+            ON CONFLICT (id) DO UPDATE SET
+                status      = EXCLUDED.status,
+                progress    = EXCLUDED.progress,
+                total       = EXCLUDED.total,
+                pages       = EXCLUDED.pages,
+                error       = EXCLUDED.error,
+                updated_at  = NOW()
+            """,
+            job["id"],
+            job["status"],
+            job.get("progress", 0),
+            job.get("total"),
+            json.dumps(job.get("request", {})),
+            json.dumps(job.get("pages", [])),
+            job.get("error"),
+            job.get("webhook_url"),
+        )
+
+
+async def get_job_row(job_id: str) -> dict[str, Any] | None:
+    async with acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT id, status, progress, total, pages, error, created_at, updated_at "
+            "FROM crawl_jobs WHERE id = $1",
+            job_id,
+        )
+    return _row_to_dict(row)
+
+
+async def list_jobs(limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+    async with acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, status, progress, total, error, created_at, updated_at "
+            "FROM crawl_jobs ORDER BY created_at DESC LIMIT $1 OFFSET $2",
+            limit,
+            offset,
+        )
+    return [_row_to_dict(r) for r in rows]  # type: ignore[misc]

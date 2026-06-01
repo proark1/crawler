@@ -35,6 +35,15 @@ const items: Item[] = [
       </svg>
     ),
   },
+  {
+    href: "/jobs",
+    label: "Jobs",
+    icon: (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" className={stroke}>
+        <path d="M4 7h16M4 12h16M4 17h10" />
+      </svg>
+    ),
+  },
 ];
 
 const accountItems: Item[] = [
@@ -50,18 +59,29 @@ const accountItems: Item[] = [
   },
 ];
 
-function NavLink({ item, active }: { item: Item; active: boolean }) {
+function NavLink({
+  item,
+  active,
+  onNavigate,
+}: {
+  item: Item;
+  active: boolean;
+  onNavigate?: () => void;
+}) {
   return (
     <Link
       href={item.href}
+      onClick={onNavigate}
       className={[
         "flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors",
         active
-          ? "bg-neutral-100 text-neutral-900 font-medium"
-          : "text-neutral-600 hover:bg-neutral-100 hover:text-neutral-900",
+          ? "bg-neutral-100 font-medium text-neutral-900 dark:bg-neutral-800 dark:text-neutral-100"
+          : "text-neutral-600 hover:bg-neutral-100 hover:text-neutral-900 dark:text-neutral-400 dark:hover:bg-neutral-800 dark:hover:text-neutral-100",
       ].join(" ")}
     >
-      <span className={active ? "text-neutral-900" : "text-neutral-500"}>{item.icon}</span>
+      <span className={active ? "text-neutral-900 dark:text-neutral-100" : "text-neutral-500 dark:text-neutral-400"}>
+        {item.icon}
+      </span>
       {item.label}
     </Link>
   );
@@ -91,11 +111,8 @@ function IndexStatus() {
       <p className="pb-2 text-[11px] font-medium uppercase tracking-wider text-neutral-400">
         Index
       </p>
-      <div className="flex items-center gap-2 text-xs text-neutral-600">
-        <span
-          className={`h-2 w-2 rounded-full ${ok ? "bg-emerald-500" : "bg-neutral-300"}`}
-          aria-hidden
-        />
+      <div className="flex items-center gap-2 text-xs text-neutral-600 dark:text-neutral-400">
+        <span className={`h-2 w-2 rounded-full ${ok ? "bg-emerald-500" : "bg-neutral-300"}`} aria-hidden />
         {ok ? (
           <span>
             {total != null ? total.toLocaleString() : "—"} page{total === 1 ? "" : "s"} stored
@@ -108,7 +125,7 @@ function IndexStatus() {
   );
 }
 
-export default function Sidebar() {
+export function NavContent({ onNavigate }: { onNavigate?: () => void }) {
   const pathname = usePathname() ?? "/";
   const isActive = (href: string) => {
     if (href === "/") return pathname === "/";
@@ -116,9 +133,9 @@ export default function Sidebar() {
   };
 
   return (
-    <aside className="hidden w-60 shrink-0 border-r border-neutral-200 bg-white md:flex md:flex-col">
-      <div className="flex items-center gap-2 px-5 pt-5 pb-6">
-        <span className="flex h-7 w-7 items-center justify-center rounded-md bg-neutral-100 text-neutral-700">
+    <>
+      <div className="flex items-center gap-2 px-5 pb-6 pt-5">
+        <span className="flex h-7 w-7 items-center justify-center rounded-md bg-neutral-100 text-neutral-700 dark:bg-neutral-800 dark:text-neutral-200">
           {SpiderIcon}
         </span>
         <span className="text-[15px] font-semibold tracking-tight">Crawler</span>
@@ -127,7 +144,8 @@ export default function Sidebar() {
       <div className="px-3">
         <Link
           href="/"
-          className="flex items-center justify-center gap-2 rounded-lg bg-[#0B1739] px-3 py-2.5 text-sm font-medium text-white shadow-sm transition-opacity hover:opacity-90"
+          onClick={onNavigate}
+          className="flex items-center justify-center gap-2 rounded-lg bg-[#0B1739] px-3 py-2.5 text-sm font-medium text-white shadow-sm transition-opacity hover:opacity-90 dark:bg-indigo-600"
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4">
             <path d="M12 5v14M5 12h14" />
@@ -142,7 +160,7 @@ export default function Sidebar() {
         </p>
         <div className="flex flex-col gap-0.5">
           {items.map((it) => (
-            <NavLink key={it.href} item={it} active={isActive(it.href)} />
+            <NavLink key={it.href} item={it} active={isActive(it.href)} onNavigate={onNavigate} />
           ))}
         </div>
 
@@ -151,12 +169,20 @@ export default function Sidebar() {
         </p>
         <div className="flex flex-col gap-0.5">
           {accountItems.map((it) => (
-            <NavLink key={it.href} item={it} active={isActive(it.href)} />
+            <NavLink key={it.href} item={it} active={isActive(it.href)} onNavigate={onNavigate} />
           ))}
         </div>
 
         <IndexStatus />
       </nav>
+    </>
+  );
+}
+
+export default function Sidebar() {
+  return (
+    <aside className="hidden w-60 shrink-0 border-r border-neutral-200 bg-white dark:border-neutral-800 dark:bg-neutral-900 md:flex md:flex-col">
+      <NavContent />
     </aside>
   );
 }

@@ -5,7 +5,16 @@ caller could point it at internal services or the cloud metadata endpoint
 (169.254.169.254) and exfiltrate secrets. We resolve each host and reject any
 that maps to a private, loopback, link-local, or otherwise non-public address.
 Redirects are validated hop-by-hop by the caller, since a public URL can 302 to
-an internal one.
+an internal one, and the browser context validates every subrequest too.
+
+Known limitation (DNS rebinding): we validate the resolved IPs, but httpx and
+the browser perform their own DNS resolution at connect time, leaving a small
+TOCTOU window. Exploiting it requires an attacker-controlled domain with a very
+low TTL plus a race between our check and the connect. Fully closing it means
+pinning the connection to the validated IP while preserving TLS SNI/Host (a
+custom transport); that is deliberately out of scope here. Deployments that need
+that guarantee should run the crawler in a network with private ranges firewalled
+off at the egress.
 """
 from __future__ import annotations
 

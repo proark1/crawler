@@ -22,7 +22,7 @@ from tenacity import (
     wait_exponential,
 )
 
-from . import antibot, concurrency, httpclient, observability, solver, ssrf
+from . import antibot, concurrency, httpclient, observability, pdfextract, solver, ssrf
 from .antibot import Tier
 from .config import settings
 
@@ -234,6 +234,7 @@ class StaticFetch:
     last_modified: str | None = None
     not_modified: bool = False
     headers: dict[str, str] | None = None
+    kind: str = "html"  # "html" | "pdf" | "other"
 
 
 class EngineUnavailable(Exception):
@@ -732,7 +733,8 @@ async def _fetch_static(url: str, cached: dict | None = None) -> StaticFetch:
                     )
                 content_type = resp.headers.get("content-type")
                 is_5xx = 500 <= resp.status_code < 600
-                if not _is_html(content_type):
+                is_pdf = (content_type or "").split(";", 1)[0].strip().lower() == "application/pdf"
+                if not _is_html(content_type) and not (is_pdf and settings.extract_pdf):
                     await resp.aclose()
                     # A non-HTML 5xx that isn't a recognised block is a genuine
                     # server error -> raise so tenacity retries it.
@@ -740,7 +742,7 @@ async def _fetch_static(url: str, cached: dict | None = None) -> StaticFetch:
                         resp.raise_for_status()
                     return StaticFetch(
                         resp.status_code, str(resp.url), content_type, None,
-                        etag, last_modified, headers=kept,
+                        etag, last_modified, headers=kept, kind="other",
                     )
                 chunks: list[bytes] = []
                 total = 0
@@ -754,6 +756,12 @@ async def _fetch_static(url: str, cached: dict | None = None) -> StaticFetch:
                         )
                     chunks.append(chunk)
                 body = b"".join(chunks)
+                if is_pdf:
+                    pdf_text = await asyncio.to_thread(pdfextract.extract_text, body)
+                    return StaticFetch(
+                        resp.status_code, str(resp.url), content_type, pdf_text,
+                        etag, last_modified, headers=kept, kind="pdf",
+                    )
                 text = body.decode(resp.encoding or "utf-8", errors="replace")
                 # Genuine 5xx (not a bot-protection challenge) -> retry; a 5xx
                 # challenge body is returned so escalation can handle it.
@@ -973,15 +981,15 @@ def _tier_plan(url: str, render: RenderMode) -> list[int]:
 
 async def _run_engine(tier: int, url: str, cached: dict | None):
     """Invoke one engine; returns (status, final_url, content_type, html, etag,
-    last_modified, not_modified, headers). Raises EngineUnavailable to skip."""
+    last_modified, not_modified, headers, kind). Raises EngineUnavailable to skip."""
     if tier == int(Tier.STATIC):
         sf = await _fetch_static(url, cached=cached)
         return (sf.status, sf.final_url, sf.content_type, sf.text, sf.etag,
-                sf.last_modified, sf.not_modified, sf.headers or {})
+                sf.last_modified, sf.not_modified, sf.headers or {}, sf.kind)
     if tier == int(Tier.IMPERSONATE):
         sf = await _fetch_impersonate(url, cached=cached)
         return (sf.status, sf.final_url, sf.content_type, sf.text, sf.etag,
-                sf.last_modified, sf.not_modified, sf.headers or {})
+                sf.last_modified, sf.not_modified, sf.headers or {}, sf.kind)
     if tier == int(Tier.SOLVER):
         host = _host_of(url)
         await ssrf.assert_url_allowed(url)
@@ -992,10 +1000,10 @@ async def _run_engine(tier: int, url: str, cached: dict | None):
         await ssrf.assert_url_allowed(res.url)
         if settings.persist_cookies and res.cookies:
             _cookie_jars[host] = res.cookies  # reuse clearance cookies in later renders
-        return (res.status, res.url, None, res.html, None, None, False, {})
+        return (res.status, res.url, None, res.html, None, None, False, {}, "html")
     # BROWSER
     status, final_url, html = await _fetch_js(url)
-    return (status, final_url, None, html, None, None, False, {})
+    return (status, final_url, None, html, None, None, False, {}, "html")
 
 
 async def _crawl_escalating(
@@ -1018,7 +1026,7 @@ async def _crawl_escalating(
         try:
             async with concurrency.limiter.slot(host):
                 (status, final_url, content_type, html, etag,
-                 last_modified, not_modified, headers) = await _run_engine(tier, url, cached)
+                 last_modified, not_modified, headers, kind) = await _run_engine(tier, url, cached)
         except concurrency.CircuitOpen:
             result["error"] = "circuit open: host temporarily skipped after repeated blocks"
             result["metadata"]["circuit"] = "open"
@@ -1060,6 +1068,25 @@ async def _crawl_escalating(
                     continue
                 result["error"] = last_error
                 return result
+
+        # PDF: `html` holds the extracted plain text; store it directly without
+        # running the HTML extractor over it.
+        if kind == "pdf":
+            if html:
+                result["text"] = html
+                result["markdown"] = html
+                result["content_hash"] = _content_hash(html)
+                result["metadata"]["content_type"] = content_type
+                result["render_mode"] = "pdf"
+                if settings.antibot_enabled:
+                    antibot.profiles.record_success(url, tier)
+                concurrency.limiter.record_success(host)
+                return result
+            # Extraction unavailable/failed -> treat as a skipped non-HTML body.
+            result["metadata"]["content_type"] = content_type
+            result["metadata"]["skipped"] = "pdf (no text extracted)"
+            result["render_mode"] = "pdf"
+            return result
 
         render_mode = "js" if tier == int(Tier.BROWSER) else "static"
 

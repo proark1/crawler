@@ -211,6 +211,29 @@ async def test_crawl_one_skips_non_html(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_crawl_one_extracts_pdf_text(monkeypatch):
+    pdf_text = "Quarterly report. " * 30
+
+    async def fake_static(url, cached=None):
+        return crawler.StaticFetch(
+            200, url, "application/pdf", pdf_text, kind="pdf"
+        )
+
+    async def allow(u):
+        return True
+
+    monkeypatch.setattr(crawler, "_fetch_static", fake_static)
+    monkeypatch.setattr(crawler, "_allowed_by_robots", allow)
+
+    res = await crawler.crawl_one("https://ex.com/report.pdf", render="static")
+    assert res["render_mode"] == "pdf"
+    assert res["text"] == pdf_text
+    assert res["markdown"] == pdf_text
+    assert res["html"] is None
+    assert res["content_hash"]
+
+
+@pytest.mark.asyncio
 async def test_crawl_site_bfs_respects_max_pages_and_depth(monkeypatch):
     # Build a synthetic link graph: every page links to two same-host children.
     async def fake_crawl_one(url, render="auto"):

@@ -64,8 +64,10 @@ a TTL DNS cache, and image/media/font blocking in the browser tier.
 ### Caching
 
 With `RECRAWL_MAX_AGE > 0`, recently stored pages are served without refetching.
-Otherwise the crawler sends `If-None-Match`/`If-Modified-Since` and reuses stored
-content on a `304`.
+Each page's own `Cache-Control: max-age` is also honored (`HONOR_CACHE_HEADERS`),
+so a server that says a page is fresh for an hour is trusted even when the global
+TTL is 0. Otherwise the crawler sends `If-None-Match`/`If-Modified-Since` and
+reuses stored content on a `304`.
 
 ### Security & politeness
 

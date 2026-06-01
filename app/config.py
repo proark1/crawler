@@ -81,6 +81,7 @@ class Settings(BaseSettings):
 
     # Caching / conditional re-crawl. 0 = always re-fetch.
     recrawl_max_age: float = 0.0  # seconds; serve stored copy if younger than this
+    honor_cache_headers: bool = True  # also respect each page's Cache-Control max-age
     store_html: bool = True  # persist (compressed) raw HTML
 
     # Extraction.

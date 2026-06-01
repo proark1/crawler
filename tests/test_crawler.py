@@ -261,6 +261,30 @@ async def test_crawl_site_bfs_respects_max_pages_and_depth(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_crawl_site_dedups_identical_content(monkeypatch):
+    # Every page returns identical content (same hash) but links onward in a chain.
+    async def fake_crawl_one(url, render="auto"):
+        return crawler.CrawlResult(
+            url=url,
+            links=[f"{url}/next"],
+            content_hash="SAME",
+            render_mode="static",
+            error=None,
+        )
+
+    monkeypatch.setattr(crawler, "crawl_one", fake_crawl_one)
+    monkeypatch.setattr(settings, "dedup_by_content", True)
+
+    results = await crawler.crawl_site(
+        "https://x.com/0", max_depth=5, max_pages=10, concurrency=1
+    )
+    # Start page expands once; the next page is duplicate content and is not
+    # re-expanded, so the crawl stops at 2 pages instead of running to max_pages.
+    assert len(results) == 2
+    assert results[1]["metadata"].get("duplicate") is True
+
+
+@pytest.mark.asyncio
 async def test_crawl_site_depth_limit(monkeypatch):
     async def fake_crawl_one(url, render="auto"):
         return crawler.CrawlResult(

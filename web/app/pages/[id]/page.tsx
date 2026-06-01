@@ -74,6 +74,11 @@ export default async function PageDetail({ params }: { params: Params }) {
         )}
         {typeof meta.author === "string" && <Pill label="Author" value={meta.author} />}
         {typeof meta.schema_type === "string" && <Pill label="Type" value={meta.schema_type} />}
+        {meta.duplicate === true && (
+          <span className="rounded-md bg-neutral-100 px-2.5 py-1 text-neutral-500 ring-1 ring-inset ring-neutral-200 dark:bg-neutral-800 dark:text-neutral-400 dark:ring-neutral-700">
+            duplicate content
+          </span>
+        )}
         {block?.vendor && (
           <span className="rounded-md bg-amber-50 px-2.5 py-1 text-amber-700 ring-1 ring-inset ring-amber-100 dark:bg-amber-950 dark:text-amber-300 dark:ring-amber-900">
             bot-protection: {block.vendor}

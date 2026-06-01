@@ -41,7 +41,8 @@ date. **PDF** responses are text-extracted too (`render_mode: pdf`, needs the
 best-effort **language detection** (`[lang]` extra) when the HTML doesn't declare
 one. Site crawls seed discovery from the site's **sitemap(s)** (robots `Sitemap:`
 lines or `/sitemap.xml`, following sitemap-index files) in addition to in-page
-links, and dedupe via `rel=canonical`. The dashboard's **Domains** view
+links, and dedupe via `rel=canonical` and by **content hash** (identical-content
+pages aren't re-expanded). The dashboard's **Domains** view
 shows which engine tier works per host and where bot protection was hit.
 
 ### Anti-bot (tiered fetch strategy)

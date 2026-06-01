@@ -1235,6 +1235,7 @@ async def crawl_site(
 
     results: list[CrawlResult] = []
     results_lock = asyncio.Lock()
+    seen_hashes: set[str] = set()
 
     def enqueue_links(res: CrawlResult, depth: int) -> None:
         # Treat a page's canonical URL as already seen, so we don't separately
@@ -1283,6 +1284,16 @@ async def crawl_site(
                         results.append(res)
                         appended = True
                         expand = len(results) < max_pages
+                        # Content-hash dedup: if another URL this run produced the
+                        # same content, record it but don't re-expand its (already
+                        # crawled) link graph.
+                        chash = res.get("content_hash")
+                        if settings.dedup_by_content and chash:
+                            if chash in seen_hashes:
+                                res.setdefault("metadata", {})["duplicate"] = True
+                                expand = False
+                            else:
+                                seen_hashes.add(chash)
                     else:
                         appended = False
                         expand = False

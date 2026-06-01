@@ -1,6 +1,6 @@
 [project]
 name = "crawler"
-version = "0.3.0"
+version = "0.4.0"
 description = "Fast web crawling service with REST API, MCP server, and dashboard"
 requires-python = ">=3.11"
 dependencies = [

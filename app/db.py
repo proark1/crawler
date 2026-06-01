@@ -245,6 +245,18 @@ async def upsert_job(job: dict[str, Any]) -> None:
         )
 
 
+async def reap_orphaned_jobs() -> int:
+    """Fail jobs left 'running'/'pending' by a previous process (in-process jobs
+    don't survive a restart). Returns the number reaped."""
+    async with acquire() as conn:
+        result = await conn.execute(
+            "UPDATE crawl_jobs SET status = 'error', "
+            "error = 'orphaned: process restarted', updated_at = NOW() "
+            "WHERE status IN ('running', 'pending')"
+        )
+    return int(result.rsplit(" ", 1)[-1] or 0)
+
+
 async def get_job_row(job_id: str) -> dict[str, Any] | None:
     async with acquire() as conn:
         row = await conn.fetchrow(

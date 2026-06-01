@@ -83,6 +83,9 @@ async def lifespan(app: FastAPI):
         )
     try:
         await db.init_pool()
+        reaped = await db.reap_orphaned_jobs()
+        if reaped:
+            log.info("reaped %d orphaned job(s) from a previous run", reaped)
     except Exception as exc:  # noqa: BLE001 -- start degraded; /health will report it
         log.error("database init failed at startup: %s", exc)
     try:

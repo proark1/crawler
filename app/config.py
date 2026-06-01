@@ -56,6 +56,22 @@ class Settings(BaseSettings):
 
     # Optional FlareSolverr endpoint for Cloudflare/DDoS-Guard challenge solving.
     flaresolverr_url: str = ""
+    flaresolverr_timeout: float = 60.0
+
+    # Adaptive per-host concurrency (AIMD): start at this many concurrent requests
+    # per host, ramp up on success, multiplicatively back off on blocks/429.
+    adaptive_concurrency: bool = True
+    host_concurrency_start: int = 2
+    host_concurrency_max: int = 8
+
+    # Per-host circuit breaker: after this many consecutive blocks, short-circuit
+    # the host for `circuit_cooldown` seconds instead of hammering it.
+    circuit_breaker_threshold: int = 5
+    circuit_cooldown: float = 300.0
+
+    # Extraction workers. 0 = run in threads (default); >0 uses a process pool of
+    # this size for true multi-core parsing throughput.
+    extract_workers: int = 0
 
     # HTTP client pool.
     http2: bool = True

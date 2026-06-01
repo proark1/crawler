@@ -523,6 +523,106 @@ async def _allowed_by_robots(url: str) -> bool:
     return rp.can_fetch(settings.user_agent, url)
 
 
+def _parse_sitemap(xml: str) -> tuple[list[str], bool]:
+    """Return (<loc> URLs, is_sitemap_index). Namespace-agnostic and defensive."""
+    import xml.etree.ElementTree as ET
+
+    try:
+        root = ET.fromstring(xml)
+    except ET.ParseError:
+        return [], False
+    is_index = root.tag.rsplit("}", 1)[-1].lower() == "sitemapindex"
+    locs = [
+        el.text.strip()
+        for el in root.iter()
+        if el.tag.rsplit("}", 1)[-1].lower() == "loc" and el.text and el.text.strip()
+    ]
+    return locs, is_index
+
+
+async def _fetch_sitemap_text(url: str) -> str | None:
+    # Follow redirects manually, validating each hop, so a sitemap URL can't
+    # redirect us into an internal service (SSRF).
+    client = httpclient.get_client(None)
+    current = url
+    resp = None
+    for _ in range(settings.max_redirects + 1):
+        await ssrf.assert_url_allowed(current)
+        resp = await client.get(
+            current, headers=antibot.browser_headers(current), follow_redirects=False
+        )
+        if 300 <= resp.status_code < 400:
+            location = resp.headers.get("location")
+            if not location:
+                return None
+            current = urljoin(current, location)
+            continue
+        break
+    else:
+        return None
+
+    if resp.status_code >= 400:
+        return None
+    content = resp.content
+    if len(content) > settings.max_response_bytes:
+        return None
+    # Detect gzip by magic bytes (robust against missing extension / wrong type).
+    if content.startswith(b"\x1f\x8b"):
+        import gzip
+
+        try:
+            content = gzip.decompress(content)
+        except Exception:  # noqa: BLE001
+            return None
+    return content.decode("utf-8", errors="replace")
+
+
+async def discover_sitemap_urls(start_url: str, limit: int | None = None) -> list[str]:
+    """Collect page URLs from a site's sitemaps (robots `Sitemap:` lines, else
+    /sitemap.xml), following sitemap-index files. Best-effort and bounded."""
+    from collections import deque
+
+    limit = limit or settings.sitemap_max_urls
+    parts = urlparse(start_url)
+    origin = f"{parts.scheme}://{parts.netloc}"
+
+    sitemaps: list[str] = []
+    rp = await _get_robots(start_url)
+    if rp is not None:
+        try:
+            sitemaps = list(rp.site_maps() or [])
+        except Exception:  # noqa: BLE001
+            sitemaps = []
+    if not sitemaps:
+        sitemaps = [f"{origin}/sitemap.xml"]
+
+    found: list[str] = []
+    seen_maps: set[str] = set()
+    queue: deque[str] = deque(sitemaps)
+    while queue and len(found) < limit and len(seen_maps) < 50:
+        sm = queue.popleft()
+        if sm in seen_maps:
+            continue
+        seen_maps.add(sm)
+        try:
+            xml = await _fetch_sitemap_text(sm)
+        except Exception:  # noqa: BLE001 -- sitemaps are best-effort
+            continue
+        if not xml:
+            continue
+        locs, is_index = _parse_sitemap(xml)
+        if is_index:
+            for loc in locs:
+                if loc not in seen_maps:
+                    queue.append(loc)
+        else:
+            for loc in locs:
+                found.append(loc)
+                if len(found) >= limit:
+                    break
+    return found[:limit]
+
+
 async def _effective_delay(url: str) -> float:
     delay = settings.per_host_delay
     if settings.respect_crawl_delay:
@@ -1044,6 +1144,7 @@ async def crawl_site(
     concurrency: int | None = None,
     cache_lookup: CacheLookup | None = None,
     on_page_crawled: Callable[[CrawlResult], None] | None = None,
+    use_sitemap: bool = False,
 ) -> list[CrawlResult]:
     max_depth = min(max_depth, settings.max_depth_hard_limit)
     max_pages = min(max_pages, settings.max_pages_hard_limit)
@@ -1053,6 +1154,21 @@ async def crawl_site(
     seen: set[str] = {start}
     queue: asyncio.Queue[tuple[str, int]] = asyncio.Queue()
     queue.put_nowait((start, 0))
+
+    # Seed from the site's sitemap(s) so discovery isn't limited to in-page links.
+    # Only when multi-page crawling is enabled (max_depth == 0 = start URL only).
+    if use_sitemap and settings.use_sitemap and max_depth > 0:
+        try:
+            for loc in await discover_sitemap_urls(start):
+                norm = _normalize(loc)
+                if norm in seen:
+                    continue
+                if same_host_only and not _same_host(norm, start):
+                    continue
+                seen.add(norm)
+                queue.put_nowait((norm, 1))
+        except Exception:  # noqa: BLE001 -- sitemap discovery is best-effort
+            pass
 
     results: list[CrawlResult] = []
     results_lock = asyncio.Lock()

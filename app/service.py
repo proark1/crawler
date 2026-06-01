@@ -37,6 +37,7 @@ async def run_crawl(
     max_pages: int = 10,
     same_host_only: bool = True,
     store: bool = True,
+    use_sitemap: bool = True,
     on_progress: Callable[[Any], None] | None = None,
 ) -> list[dict]:
     """Crawl one URL or a site, persist results, and return HTML-stripped pages.
@@ -53,6 +54,7 @@ async def run_crawl(
             same_host_only=same_host_only,
             cache_lookup=make_cache_lookup(store),
             on_page_crawled=on_progress,
+            use_sitemap=use_sitemap,
         )
     else:
         cached = None

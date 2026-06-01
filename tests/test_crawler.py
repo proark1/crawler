@@ -349,6 +349,76 @@ def test_extract_jsonld_ignores_non_string_product_fields():
     assert prod.get("availability") == "InStock"  # valid string survives
 
 
+def test_parse_sitemap_urlset_and_index():
+    urlset = """<?xml version="1.0"?>
+    <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+      <url><loc>https://x.com/a</loc></url>
+      <url><loc>https://x.com/b</loc></url>
+    </urlset>"""
+    locs, is_index = crawler._parse_sitemap(urlset)
+    assert is_index is False
+    assert locs == ["https://x.com/a", "https://x.com/b"]
+
+    index = """<?xml version="1.0"?>
+    <sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+      <sitemap><loc>https://x.com/sitemap1.xml</loc></sitemap>
+    </sitemapindex>"""
+    locs, is_index = crawler._parse_sitemap(index)
+    assert is_index is True
+    assert locs == ["https://x.com/sitemap1.xml"]
+
+
+def test_parse_sitemap_handles_garbage():
+    assert crawler._parse_sitemap("not xml at all") == ([], False)
+
+
+@pytest.mark.asyncio
+async def test_discover_sitemap_follows_index(monkeypatch):
+    pages = {
+        "https://x.com/sitemap.xml": (
+            '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+            "<sitemap><loc>https://x.com/sm1.xml</loc></sitemap></sitemapindex>"
+        ),
+        "https://x.com/sm1.xml": (
+            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+            "<url><loc>https://x.com/p1</loc></url>"
+            "<url><loc>https://x.com/p2</loc></url></urlset>"
+        ),
+    }
+
+    async def fake_robots(url):
+        return None  # no robots -> falls back to /sitemap.xml
+
+    async def fake_fetch(url):
+        return pages.get(url)
+
+    monkeypatch.setattr(crawler, "_get_robots", fake_robots)
+    monkeypatch.setattr(crawler, "_fetch_sitemap_text", fake_fetch)
+
+    urls = await crawler.discover_sitemap_urls("https://x.com/")
+    assert urls == ["https://x.com/p1", "https://x.com/p2"]
+
+
+@pytest.mark.asyncio
+async def test_crawl_site_seeds_from_sitemap(monkeypatch):
+    async def fake_discover(start, limit=None):
+        return ["https://x.com/from-sitemap"]
+
+    async def fake_crawl_one(url, render="auto"):
+        return crawler.CrawlResult(url=url, links=[], render_mode="static", error=None)
+
+    monkeypatch.setattr(crawler, "discover_sitemap_urls", fake_discover)
+    monkeypatch.setattr(crawler, "crawl_one", fake_crawl_one)
+    monkeypatch.setattr(settings, "use_sitemap", True)
+
+    results = await crawler.crawl_site(
+        "https://x.com/", max_depth=1, max_pages=10, use_sitemap=True
+    )
+    urls = {r["url"] for r in results}
+    assert "https://x.com" in urls  # start
+    assert "https://x.com/from-sitemap" in urls  # seeded from sitemap
+
+
 def test_domain_profile_snapshot():
     from app.antibot import DomainProfileStore, Tier
 

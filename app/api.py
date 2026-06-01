@@ -30,6 +30,7 @@ class CrawlRequest(BaseModel):
     max_pages: int = Field(10, ge=1, le=100)
     same_host_only: bool = True
     store: bool = True
+    use_sitemap: bool = True
     webhook_url: HttpUrl | None = None
 
 
@@ -170,6 +171,7 @@ async def _run_crawl(req: CrawlRequest, on_progress=None) -> list[dict]:
         max_pages=req.max_pages,
         same_host_only=req.same_host_only,
         store=req.store,
+        use_sitemap=req.use_sitemap,
         on_progress=on_progress,
     )
 

@@ -87,6 +87,10 @@ class Settings(BaseSettings):
     extract_metadata: bool = True  # OpenGraph / JSON-LD / canonical / language
     emit_markdown: bool = True  # include a Markdown rendering of the main content
 
+    # Discovery: seed follow-link crawls from sitemap.xml / robots Sitemap: lines.
+    use_sitemap: bool = True
+    sitemap_max_urls: int = 1000
+
     # Politeness.
     respect_robots: bool = True
     respect_crawl_delay: bool = True

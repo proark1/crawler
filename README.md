@@ -36,7 +36,9 @@ loop, and transient network failures (incl. 5xx) are retried with backoff.
 Beyond title/text/links, each page yields a Markdown rendering plus structured
 metadata: OpenGraph, JSON-LD (incl. Article and Product fields — price,
 currency, availability, brand), canonical URL, language, author, and publish
-date. Site crawls dedupe via `rel=canonical`. The dashboard's **Domains** view
+date. Site crawls seed discovery from the site's **sitemap(s)** (robots `Sitemap:`
+lines or `/sitemap.xml`, following sitemap-index files) in addition to in-page
+links, and dedupe via `rel=canonical`. The dashboard's **Domains** view
 shows which engine tier works per host and where bot protection was hit.
 
 ### Anti-bot (tiered fetch strategy)

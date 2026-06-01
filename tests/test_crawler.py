@@ -312,6 +312,56 @@ def test_extract_structured_metadata():
     assert m["schema_type"] == "Article"
 
 
+def test_extract_jsonld_product_and_graph():
+    html = """
+    <html><head><title>Shoe</title>
+    <script type="application/ld+json">
+    {"@graph":[{"@type":"Product","name":"Runner","brand":{"name":"Acme"},
+      "offers":{"@type":"Offer","price":"79.99","priceCurrency":"USD",
+                "availability":"https://schema.org/InStock"}}]}
+    </script></head><body><p>shoe</p></body></html>
+    """
+    ext = crawler._extract_sync(html, "https://shop.example/p")
+    prod = ext.metadata["product"]
+    assert ext.metadata["schema_type"] == "Product"
+    assert prod["name"] == "Runner"
+    assert prod["brand"] == "Acme"
+    assert prod["price"] == "79.99"
+    assert prod["currency"] == "USD"
+    assert prod["availability"] == "InStock"
+
+
+def test_extract_jsonld_ignores_non_string_product_fields():
+    # Malformed JSON-LD must never put dict/list objects into product fields
+    # (the frontend would crash rendering them).
+    html = """
+    <html><head><title>Bad</title>
+    <script type="application/ld+json">
+    {"@type":"Product","name":"X","brand":{"name":{"nested":"obj"}},
+     "offers":{"price":{"x":1},"priceCurrency":["USD"],"availability":"InStock"}}
+    </script></head><body><p>x</p></body></html>
+    """
+    ext = crawler._extract_sync(html, "https://shop.example/p")
+    prod = ext.metadata.get("product", {})
+    assert "brand" not in prod
+    assert "price" not in prod
+    assert "currency" not in prod
+    assert prod.get("availability") == "InStock"  # valid string survives
+
+
+def test_domain_profile_snapshot():
+    from app.antibot import DomainProfileStore, Tier
+
+    store = DomainProfileStore(max_size=10)
+    store.record_block("https://a.com", int(Tier.STATIC), "cloudflare")
+    store.record_success("https://b.com", int(Tier.STATIC))
+    snap = store.snapshot()
+    by_host = {d["host"]: d for d in snap}
+    assert by_host["a.com"]["engine"] == "impersonate"  # bumped past static
+    assert by_host["a.com"]["last_vendor"] == "cloudflare"
+    assert by_host["b.com"]["engine"] == "static"
+
+
 @pytest.mark.asyncio
 async def test_crawl_site_serves_fresh_from_cache(monkeypatch):
     from datetime import datetime

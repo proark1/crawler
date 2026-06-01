@@ -18,6 +18,10 @@ export default async function PageDetail({ params }: { params: Params }) {
   }
 
   const meta = (page.metadata ?? {}) as Record<string, unknown>;
+  const block = meta.block as { vendor?: string } | undefined;
+  const product = meta.product as
+    | { name?: string; brand?: string; price?: string; currency?: string; availability?: string }
+    | undefined;
 
   return (
     <div className="space-y-6">
@@ -66,6 +70,12 @@ export default async function PageDetail({ params }: { params: Params }) {
         {page.status != null && <Pill label="Status" value={String(page.status)} mono />}
         {typeof meta.language === "string" && <Pill label="Lang" value={meta.language} />}
         {typeof meta.author === "string" && <Pill label="Author" value={meta.author} />}
+        {typeof meta.schema_type === "string" && <Pill label="Type" value={meta.schema_type} />}
+        {block?.vendor && (
+          <span className="rounded-md bg-amber-50 px-2.5 py-1 text-amber-700 ring-1 ring-inset ring-amber-100 dark:bg-amber-950 dark:text-amber-300 dark:ring-amber-900">
+            bot-protection: {block.vendor}
+          </span>
+        )}
         {page.fetched_at && <Pill value={new Date(page.fetched_at).toLocaleString()} />}
         {page.error && (
           <span className="rounded-md bg-red-50 px-2.5 py-1 text-red-700 ring-1 ring-inset ring-red-100 dark:bg-red-950 dark:text-red-300 dark:ring-red-900">
@@ -73,6 +83,26 @@ export default async function PageDetail({ params }: { params: Params }) {
           </span>
         )}
       </div>
+
+      {product && (product.price || product.name) && (
+        <div className="rounded-xl border border-neutral-200 bg-white px-5 py-4 text-sm dark:border-neutral-800 dark:bg-neutral-900">
+          <div className="mb-1 text-xs font-medium uppercase tracking-wider text-neutral-400">Product</div>
+          <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-neutral-800 dark:text-neutral-200">
+            {product.name && <span className="font-medium">{product.name}</span>}
+            {product.brand && <span className="text-neutral-500 dark:text-neutral-400">{product.brand}</span>}
+            {product.price && (
+              <span className="font-mono">
+                {product.price} {product.currency ?? ""}
+              </span>
+            )}
+            {product.availability && (
+              <span className="rounded bg-neutral-100 px-1.5 py-0.5 text-xs dark:bg-neutral-800">
+                {product.availability}
+              </span>
+            )}
+          </div>
+        </div>
+      )}
 
       {page.text ? (
         <article className="whitespace-pre-wrap rounded-xl border border-neutral-200 bg-white px-5 py-4 text-sm leading-relaxed text-neutral-800 dark:border-neutral-800 dark:bg-neutral-900 dark:text-neutral-200">

@@ -288,6 +288,28 @@ async def stream_crawl_job(job_id: str) -> StreamingResponse:
     return StreamingResponse(event_gen(), media_type="text/event-stream")
 
 
+class DomainProfileOut(BaseModel):
+    host: str
+    min_tier: int
+    engine: str
+    successes: int
+    blocks: int
+    last_vendor: str | None = None
+    last_block_at: float | None = None
+
+
+@app.get(
+    "/domains",
+    response_model=list[DomainProfileOut],
+    dependencies=[Depends(require_api_key)],
+)
+async def list_domains(limit: int = Query(200, ge=1, le=1000)) -> list[DomainProfileOut]:
+    """The anti-bot strategy the crawler learned per domain (engine tier, blocks)."""
+    from .antibot import profiles
+
+    return [DomainProfileOut(**d) for d in profiles.snapshot(limit=limit)]
+
+
 @app.get("/pages", response_model=list[PageOut], dependencies=[Depends(require_api_key)])
 async def list_pages(
     response: Response,

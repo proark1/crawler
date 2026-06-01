@@ -34,7 +34,10 @@ loop, and transient network failures (incl. 5xx) are retried with backoff.
 ### Extraction
 
 Beyond title/text/links, each page yields a Markdown rendering plus structured
-metadata: OpenGraph, JSON-LD, canonical URL, language, author, and publish date.
+metadata: OpenGraph, JSON-LD (incl. Article and Product fields — price,
+currency, availability, brand), canonical URL, language, author, and publish
+date. Site crawls dedupe via `rel=canonical`. The dashboard's **Domains** view
+shows which engine tier works per host and where bot protection was hit.
 
 ### Anti-bot (tiered fetch strategy)
 
@@ -83,6 +86,7 @@ Structured JSON logs, Prometheus metrics at `/metrics`, and optional Sentry
 | GET    | `/crawl/jobs` | List recent jobs |
 | GET    | `/crawl/jobs/{id}` | Poll job status / results |
 | GET    | `/crawl/jobs/{id}/stream` | Live progress via Server-Sent Events |
+| GET    | `/domains` | Per-domain anti-bot strategy the crawler has learned |
 | GET    | `/pages` | List stored pages (paginated, `X-Total-Count` header) |
 | GET    | `/pages/export?format=` | Export all pages as `json`/`csv`/`md` |
 | GET    | `/pages/search?q=` | Ranked full-text search |

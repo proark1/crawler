@@ -28,6 +28,41 @@ class Settings(BaseSettings):
     block_resources_in_js: bool = True
     js_context_pool_size: int = 2
 
+    # --- Anti-bot / evasion (tiered fetch strategy) ------------------------- #
+    # Master switch for realistic headers, block detection, and engine escalation.
+    antibot_enabled: bool = True
+    # When a fetch looks blocked (Cloudflare/DataDome/403/429/...), escalate to the
+    # next stronger engine instead of giving up.
+    escalate_on_block: bool = True
+    # curl_cffi browser impersonation target (TLS/JA3 + HTTP/2). "" disables the
+    # impersonation tier. Examples: chrome, chrome124, safari, edge.
+    impersonate_browser: str = "chrome"
+    # Realistic default Accept-Language sent with browser-like header profiles.
+    accept_language: str = "en-US,en;q=0.9"
+    # Apply stealth patches (navigator.webdriver, chrome runtime, etc.) to the
+    # headless browser, and use patchright instead of playwright when installed.
+    browser_stealth: bool = True
+    # Persist and replay cookies per host (helps "challenge once, then allow").
+    persist_cookies: bool = True
+    # Remember the minimum engine tier that worked per host, to skip re-escalation.
+    domain_profile_size: int = 5000
+
+    # Proxies. `proxy_url` is a single proxy; `proxy_pool` is a comma-separated
+    # rotation list. Proxied targets are still SSRF-validated.
+    proxy_url: str = ""
+    proxy_pool: str = ""
+    # Tiers (and above) that route through a proxy: 0=static 1=impersonate 2=browser.
+    proxy_from_tier: int = 1
+
+    # Optional FlareSolverr endpoint for Cloudflare/DDoS-Guard challenge solving.
+    flaresolverr_url: str = ""
+
+    # HTTP client pool.
+    http2: bool = True
+    max_keepalive_connections: int = 20
+    max_connections: int = 100
+    dns_cache_ttl: float = 300.0  # seconds to cache validated DNS results
+
     # Caching / conditional re-crawl. 0 = always re-fetch.
     recrawl_max_age: float = 0.0  # seconds; serve stored copy if younger than this
     store_html: bool = True  # persist (compressed) raw HTML
@@ -62,6 +97,13 @@ class Settings(BaseSettings):
     @property
     def ssrf_allowed_hosts(self) -> set[str]:
         return {h.strip().lower() for h in self.ssrf_allowlist.split(",") if h.strip()}
+
+    @property
+    def proxies(self) -> list[str]:
+        pool = [p.strip() for p in self.proxy_pool.split(",") if p.strip()]
+        if self.proxy_url and self.proxy_url not in pool:
+            pool.insert(0, self.proxy_url)
+        return pool
 
     @property
     def is_production(self) -> bool:

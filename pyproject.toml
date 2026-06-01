@@ -6,7 +6,8 @@ requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
-    "httpx>=0.27",
+    "httpx[http2]>=0.27",
+    "brotli>=1.1",
     "selectolax>=0.3.21",
     "trafilatura>=1.12",
     "playwright>=1.48",
@@ -19,6 +20,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Browser TLS/HTTP2 impersonation (Tier 1 anti-bot engine).
+impersonate = ["curl_cffi>=0.7"]
+# Stealth-patched headless browser (Tier 2 anti-bot engine).
+stealth = ["patchright>=1.0"]
 sentry = ["sentry-sdk>=2.0"]
 dev = [
     "pytest>=8.0",

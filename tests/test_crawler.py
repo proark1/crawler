@@ -123,6 +123,69 @@ async def test_crawl_one_auto_falls_back_to_js_when_empty(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_tier_plan_by_render_mode():
+    assert crawler._tier_plan("https://x.com", "static") == [0]
+    assert crawler._tier_plan("https://x.com", "js") == [2]
+    assert crawler._tier_plan("https://x.com", "auto")[0] == 0  # starts at static
+
+
+@pytest.mark.asyncio
+async def test_crawl_one_escalates_past_cloudflare(monkeypatch):
+    cf = "<html><head><title>Just a moment...</title></head><body>cf-chl</body></html>"
+
+    async def fake_static(url, cached=None):
+        return crawler.StaticFetch(
+            403, url, "text/html", cf, headers={"server": "cloudflare"}
+        )
+
+    async def fake_js(url):
+        big = "real content " * 60
+        return 200, url, f"<html><head><title>OK</title></head><body><p>{big}</p></body></html>"
+
+    async def allow(u):
+        return True
+
+    monkeypatch.setattr(crawler, "_fetch_static", fake_static)
+    monkeypatch.setattr(crawler, "_fetch_js", fake_js)
+    monkeypatch.setattr(crawler, "_allowed_by_robots", allow)
+    monkeypatch.setattr(settings, "antibot_enabled", True)
+    monkeypatch.setattr(settings, "escalate_on_block", True)
+
+    res = await crawler.crawl_one("https://shop.example/x", render="auto")
+    # Static was a Cloudflare challenge; the crawler escalated to the browser tier.
+    assert res["render_mode"] == "js"
+    assert res["title"] == "OK"
+    assert res["metadata"]["block"]["vendor"] == "cloudflare"
+
+
+@pytest.mark.asyncio
+async def test_crawl_one_aborts_without_escalating_on_ssrf_redirect(monkeypatch):
+    from app import ssrf
+
+    js_called = {"n": 0}
+
+    async def blocked_static(url, cached=None):
+        raise ssrf.BlockedAddressError("example.com resolves to non-public address 10.0.0.1")
+
+    async def fake_js(url):
+        js_called["n"] += 1
+        return 200, url, "<html><body>x</body></html>"
+
+    async def allow(u):
+        return True
+
+    monkeypatch.setattr(crawler, "_fetch_static", blocked_static)
+    monkeypatch.setattr(crawler, "_fetch_js", fake_js)
+    monkeypatch.setattr(crawler, "_allowed_by_robots", allow)
+
+    res = await crawler.crawl_one("https://evil.example/x", render="auto")
+    # Must abort with an SSRF error and never escalate to the browser tier.
+    assert res["error"].startswith("blocked:")
+    assert res["metadata"].get("ssrf")
+    assert js_called["n"] == 0
+
+
+@pytest.mark.asyncio
 async def test_crawl_one_skips_non_html(monkeypatch):
     async def fake_static(url, cached=None):
         return crawler.StaticFetch(200, url, "application/pdf", None)

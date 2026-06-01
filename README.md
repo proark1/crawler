@@ -36,6 +36,22 @@ loop, and transient network failures (incl. 5xx) are retried with backoff.
 Beyond title/text/links, each page yields a Markdown rendering plus structured
 metadata: OpenGraph, JSON-LD, canonical URL, language, author, and publish date.
 
+### Anti-bot (tiered fetch strategy)
+
+Bot-protected sites (Cloudflare, DataDome, PerimeterX, Imperva, Akamai) are
+handled by escalating engines: pooled httpx → `curl_cffi` browser TLS/HTTP-2
+impersonation → stealth headless browser → challenge solver. A block detector
+decides when to escalate, and each domain remembers the tier that worked. See
+[`ANTIBOT.md`](ANTIBOT.md). Optional engines:
+
+```bash
+pip install '.[impersonate]'   # curl_cffi TLS/JA3 impersonation (Tier 1)
+pip install '.[stealth]'       # patchright stealth browser (Tier 2)
+```
+
+Performance: a shared pooled HTTP/2 keep-alive client (no per-page handshakes),
+a TTL DNS cache, and image/media/font blocking in the browser tier.
+
 ### Caching
 
 With `RECRAWL_MAX_AGE > 0`, recently stored pages are served without refetching.

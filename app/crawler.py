@@ -22,7 +22,8 @@ from tenacity import (
     wait_exponential,
 )
 
-from . import ssrf
+from . import antibot, httpclient, ssrf
+from .antibot import Tier
 from .config import settings
 
 if TYPE_CHECKING:
@@ -67,7 +68,9 @@ class _ContextPool:
 
     async def _make(self) -> BrowserContext:
         browser = await get_browser()
-        context = await browser.new_context(user_agent=settings.user_agent)
+        context = await browser.new_context(**_context_kwargs())
+        if settings.browser_stealth:
+            await context.add_init_script(_STEALTH_JS)
         # Validate every request the page makes (not just navigations) so a
         # malicious page can't reach internal hosts via iframes/scripts/XHR,
         # and drop heavy resources for speed.
@@ -127,6 +130,37 @@ async def _route_request(route) -> None:  # type: ignore[no-untyped-def]
         await route.continue_()
 
 
+# JavaScript injected before page scripts run, to hide the most common headless
+# tells (navigator.webdriver, missing plugins/languages, absent window.chrome).
+_STEALTH_JS = """
+Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
+Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+window.chrome = window.chrome || { runtime: {} };
+const _q = window.navigator.permissions && window.navigator.permissions.query;
+if (_q) {
+  window.navigator.permissions.query = (p) =>
+    p && p.name === 'notifications'
+      ? Promise.resolve({ state: Notification.permission })
+      : _q(p);
+}
+"""
+
+
+def _playwright_async():  # type: ignore[no-untyped-def]
+    """Prefer patchright (a stealth-patched Playwright) when installed and enabled."""
+    if settings.browser_stealth:
+        try:  # pragma: no cover - depends on optional dep
+            from patchright.async_api import async_playwright
+
+            return async_playwright()
+        except Exception:  # noqa: BLE001
+            pass
+    from playwright.async_api import async_playwright
+
+    return async_playwright()
+
+
 async def get_browser() -> Browser:
     """Lazily start Playwright and launch a single Chromium reused across requests."""
     global _pw, _browser
@@ -135,19 +169,37 @@ async def get_browser() -> Browser:
     async with _browser_lock:
         if _browser is not None and _browser.is_connected():
             return _browser
-        from playwright.async_api import async_playwright
-
-        _pw = await async_playwright().start()
-        _browser = await _pw.chromium.launch(
-            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
-        )
+        _pw = await _playwright_async().start()
+        args = ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
+        if settings.browser_stealth:
+            args += ["--disable-blink-features=AutomationControlled"]
+        _browser = await _pw.chromium.launch(args=args)
         return _browser
 
 
+def _context_kwargs(proxy: str | None = None) -> dict:
+    """Realistic context options (UA, locale, viewport) for stealthy rendering."""
+    kwargs: dict = {}
+    if settings.antibot_enabled:
+        kwargs.update(
+            user_agent=antibot._CHROME_UA,
+            locale="en-US",
+            timezone_id="America/New_York",
+            viewport={"width": 1280, "height": 800},
+            extra_http_headers={"Accept-Language": settings.accept_language},
+        )
+    else:
+        kwargs["user_agent"] = settings.user_agent
+    if proxy:
+        kwargs["proxy"] = {"server": proxy}
+    return kwargs
+
+
 async def close_browser() -> None:
-    """Shut down the shared browser and context pool. Call on app shutdown."""
+    """Shut down the shared browser, context pool, and pooled HTTP clients."""
     global _pw, _browser
     await _context_pool.close()
+    await httpclient.aclose_all()
     if _browser is not None:
         try:
             await _browser.close()
@@ -178,6 +230,21 @@ class StaticFetch:
     etag: str | None = None
     last_modified: str | None = None
     not_modified: bool = False
+    headers: dict[str, str] | None = None
+
+
+class EngineUnavailable(Exception):
+    """Raised by an engine that isn't installed/configured, so escalation skips it."""
+
+
+# Optional curl_cffi import for the TLS/HTTP2 impersonation engine.
+try:  # pragma: no cover - import probe
+    from curl_cffi.requests import AsyncSession as _CurlSession
+
+    _CURL_CFFI = True
+except Exception:  # noqa: BLE001
+    _CurlSession = None  # type: ignore[assignment]
+    _CURL_CFFI = False
 
 
 @dataclass
@@ -428,14 +495,41 @@ def _is_transient(exc: BaseException) -> bool:
 # --------------------------------------------------------------------------- #
 
 
-async def _fetch_static(url: str, cached: dict | None = None) -> StaticFetch:
-    """Fetch with manual, SSRF-validated redirects and optional conditional headers."""
-    headers = {"User-Agent": settings.user_agent, "Accept": "text/html,*/*;q=0.8"}
+def _conditional_headers(headers: dict[str, str], cached: dict | None) -> dict[str, str]:
     if cached:
         if cached.get("etag"):
             headers["If-None-Match"] = cached["etag"]
         if cached.get("last_modified"):
             headers["If-Modified-Since"] = cached["last_modified"]
+    return headers
+
+
+def _is_block(status: int | None, headers: dict[str, str], html: str | None) -> bool:
+    """True if anti-bot is on and this response looks like a block/challenge."""
+    return settings.antibot_enabled and antibot.detect_block(status, headers, html).blocked
+
+
+def _kept_headers(resp_headers) -> dict[str, str]:  # type: ignore[no-untyped-def]
+    """Keep just the response headers block detection cares about."""
+    keep = ("server", "cf-mitigated", "content-type", "set-cookie", "x-powered-by")
+    out: dict[str, str] = {}
+    for k in keep:
+        v = resp_headers.get(k)
+        if v:
+            out[k] = v
+    return out
+
+
+async def _fetch_static(url: str, cached: dict | None = None) -> StaticFetch:
+    """Tier 0: pooled httpx fetch with browser headers and SSRF-validated redirects.
+
+    Does not raise for 4xx / 503 — those bodies are returned so the block
+    detector can classify a challenge; genuine 5xx still raise to trigger retry.
+    """
+    headers = _conditional_headers(antibot.browser_headers(url), cached)
+    host = urlparse(url).hostname or ""
+    proxy = antibot.proxies.pick(host, int(Tier.STATIC))
+    client = httpclient.get_client(proxy)
     timeout = httpx.Timeout(settings.request_timeout)
 
     @retry(
@@ -445,67 +539,161 @@ async def _fetch_static(url: str, cached: dict | None = None) -> StaticFetch:
         reraise=True,
     )
     async def _do() -> StaticFetch:
-        async with ssrf.build_async_client(
-            follow_redirects=False, headers=headers, timeout=timeout
-        ) as client:
-            current = url
-            for _ in range(settings.max_redirects + 1):
-                await ssrf.assert_url_allowed(current)
-                await _respect_delay(current)
-                async with client.stream("GET", current) as resp:
-                    if resp.is_redirect:
-                        location = resp.headers.get("location")
-                        if not location:
-                            raise httpx.HTTPError("redirect response missing Location header")
-                        current = urljoin(current, location)
-                        continue
+        current = url
+        for _ in range(settings.max_redirects + 1):
+            await ssrf.assert_url_allowed(current)
+            await _respect_delay(current)
+            async with client.stream("GET", current, headers=headers, timeout=timeout) as resp:
+                if resp.is_redirect:
+                    location = resp.headers.get("location")
+                    if not location:
+                        raise httpx.HTTPError("redirect response missing Location header")
+                    current = urljoin(current, location)
+                    continue
 
-                    etag = resp.headers.get("etag")
-                    last_modified = resp.headers.get("last-modified")
-                    if resp.status_code == 304:
-                        return StaticFetch(
-                            304, current, resp.headers.get("content-type"),
-                            None, etag, last_modified, not_modified=True,
-                        )
-                    resp.raise_for_status()
-                    content_type = resp.headers.get("content-type")
-                    if not _is_html(content_type):
+                etag = resp.headers.get("etag")
+                last_modified = resp.headers.get("last-modified")
+                kept = _kept_headers(resp.headers)
+                if resp.status_code == 304:
+                    return StaticFetch(
+                        304, current, resp.headers.get("content-type"),
+                        None, etag, last_modified, not_modified=True, headers=kept,
+                    )
+                content_type = resp.headers.get("content-type")
+                is_5xx = 500 <= resp.status_code < 600
+                if not _is_html(content_type):
+                    await resp.aclose()
+                    # A non-HTML 5xx that isn't a recognised block is a genuine
+                    # server error -> raise so tenacity retries it.
+                    if is_5xx and not _is_block(resp.status_code, kept, None):
+                        resp.raise_for_status()
+                    return StaticFetch(
+                        resp.status_code, str(resp.url), content_type, None,
+                        etag, last_modified, headers=kept,
+                    )
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in resp.aiter_bytes():
+                    total += len(chunk)
+                    if total > settings.max_response_bytes:
                         await resp.aclose()
                         return StaticFetch(
                             resp.status_code, str(resp.url), content_type, None,
-                            etag, last_modified,
+                            etag, last_modified, headers=kept,
                         )
-                    chunks: list[bytes] = []
-                    total = 0
-                    async for chunk in resp.aiter_bytes():
-                        total += len(chunk)
-                        if total > settings.max_response_bytes:
-                            await resp.aclose()
-                            return StaticFetch(
-                                resp.status_code, str(resp.url), content_type, None,
-                                etag, last_modified,
-                            )
-                        chunks.append(chunk)
-                    body = b"".join(chunks)
-                    text = body.decode(resp.encoding or "utf-8", errors="replace")
-                    return StaticFetch(
-                        resp.status_code, str(resp.url), content_type, text,
-                        etag, last_modified,
-                    )
-            raise httpx.HTTPError(f"too many redirects (>{settings.max_redirects})")
+                    chunks.append(chunk)
+                body = b"".join(chunks)
+                text = body.decode(resp.encoding or "utf-8", errors="replace")
+                # Genuine 5xx (not a bot-protection challenge) -> retry; a 5xx
+                # challenge body is returned so escalation can handle it.
+                if is_5xx and not _is_block(resp.status_code, kept, text):
+                    resp.raise_for_status()
+                return StaticFetch(
+                    resp.status_code, str(resp.url), content_type, text,
+                    etag, last_modified, headers=kept,
+                )
+        raise httpx.HTTPError(f"too many redirects (>{settings.max_redirects})")
 
     return await _do()
 
 
+async def _fetch_impersonate(url: str, cached: dict | None = None) -> StaticFetch:
+    """Tier 1: curl_cffi fetch impersonating a real browser's TLS/HTTP2 fingerprint.
+
+    Beats passive Cloudflare/Akamai fingerprint checks that plain httpx fails.
+    Raises EngineUnavailable when curl_cffi isn't installed.
+    """
+    if not (_CURL_CFFI and settings.impersonate_browser):
+        raise EngineUnavailable("curl_cffi not installed or impersonation disabled")
+
+    host = urlparse(url).hostname or ""
+    proxy = antibot.proxies.pick(host, int(Tier.IMPERSONATE))
+    # Let curl_cffi's impersonation own the fingerprint-sensitive headers
+    # (UA/sec-ch-ua/Accept); only add Accept-Language and conditional headers.
+    headers = _conditional_headers({"Accept-Language": settings.accept_language}, cached)
+    proxies = {"http": proxy, "https": proxy} if proxy else None
+
+    # Follow redirects manually, validating every hop *before* the request, so
+    # a public URL can't redirect us into an internal service (SSRF). curl_cffi
+    # does its own DNS, so a small rebinding window remains (documented in
+    # SECURITY.md for this tier).
+    async with _CurlSession() as session:
+        current = url
+        resp = None
+        for _ in range(settings.max_redirects + 1):
+            await ssrf.assert_url_allowed(current)
+            await _respect_delay(current)
+            resp = await session.get(
+                current,
+                headers=headers,
+                impersonate=settings.impersonate_browser,
+                proxies=proxies,
+                allow_redirects=False,
+                timeout=settings.request_timeout,
+            )
+            if 300 <= resp.status_code < 400:
+                location = resp.headers.get("location")
+                if not location:
+                    raise httpx.HTTPError("redirect response missing Location header")
+                current = urljoin(current, location)
+                continue
+            break
+        else:
+            raise httpx.HTTPError(f"too many redirects (>{settings.max_redirects})")
+    final_url = str(resp.url)
+
+    resp_headers = {k.lower(): v for k, v in dict(resp.headers).items()}
+    kept = _kept_headers(resp_headers)
+    etag = resp_headers.get("etag")
+    last_modified = resp_headers.get("last-modified")
+    if resp.status_code == 304:
+        return StaticFetch(304, final_url, resp_headers.get("content-type"), None,
+                           etag, last_modified, not_modified=True, headers=kept)
+    content_type = resp_headers.get("content-type")
+    content = resp.content or b""
+    if not _is_html(content_type) or len(content) > settings.max_response_bytes:
+        return StaticFetch(resp.status_code, final_url, content_type, None,
+                           etag, last_modified, headers=kept)
+    text = content.decode(resp.encoding or "utf-8", errors="replace")
+    return StaticFetch(resp.status_code, final_url, content_type, text,
+                       etag, last_modified, headers=kept)
+
+
+# Per-host cookie jars (bounded), so a domain that "challenges once, then allows"
+# keeps its clearance cookie across renders.
+_cookie_jars: dict[str, list] = {}
+
+
+def _host_of(url: str) -> str:
+    return (urlparse(url).hostname or "").lower().removeprefix("www.")
+
+
 async def _fetch_js(url: str) -> tuple[int, str, str]:
     await ssrf.assert_url_allowed(url)
-    context = await _context_pool.acquire()
+    host = _host_of(url)
+    proxy = antibot.proxies.pick(host, int(Tier.BROWSER))
+
+    # A proxied render needs its own context (the pool's contexts are direct);
+    # otherwise reuse a pooled context for speed.
+    dedicated = proxy is not None
+    if dedicated:
+        browser = await get_browser()
+        context = await browser.new_context(**_context_kwargs(proxy))
+        if settings.browser_stealth:
+            await context.add_init_script(_STEALTH_JS)
+        await context.route("**/*", _route_request)
+    else:
+        context = await _context_pool.acquire()
+
     page = None
     try:
         await _respect_delay(url)
+        if settings.persist_cookies and _cookie_jars.get(host):
+            try:
+                await context.add_cookies(_cookie_jars[host])
+            except Exception:  # noqa: BLE001
+                pass
         page = await context.new_page()
-        # Let goto failures (DNS, connection, navigation timeout) propagate so the
-        # caller records a real error instead of a fake 200.
         response = await page.goto(
             url,
             wait_until="domcontentloaded",
@@ -513,10 +701,7 @@ async def _fetch_js(url: str) -> tuple[int, str, str]:
         )
         status = response.status if response is not None else 200
         final_url = page.url
-        # Validate the post-redirect landing URL too (browser may have followed 3xx).
         await ssrf.assert_url_allowed(final_url)
-        # Give client-side rendering a brief moment to settle, but never block
-        # forever waiting for networkidle on pages that never go idle.
         try:
             await page.wait_for_load_state(
                 "networkidle", timeout=min(5000, settings.js_render_timeout * 1000)
@@ -524,11 +709,23 @@ async def _fetch_js(url: str) -> tuple[int, str, str]:
         except Exception:  # noqa: BLE001 -- networkidle is best-effort
             pass
         html = await page.content()
+        if settings.persist_cookies:
+            try:
+                jar = await context.cookies()
+                if jar:
+                    _cookie_jars[host] = jar
+                    if len(_cookie_jars) > 5000:
+                        _cookie_jars.pop(next(iter(_cookie_jars)))
+            except Exception:  # noqa: BLE001
+                pass
         return status, final_url, html
     finally:
         if page is not None:
             await page.close()
-        await _context_pool.release(context)
+        if dedicated:
+            await context.close()
+        else:
+            await _context_pool.release(context)
 
 
 # --------------------------------------------------------------------------- #
@@ -585,53 +782,108 @@ async def crawl_one(
         result["metadata"]["robots"] = "disallowed"
         return result
 
-    static_html: str | None = None
-    static_error: str | None = None
+    return await _crawl_escalating(url, render, cached, result)
 
-    if render in ("auto", "static"):
+
+def _tier_plan(url: str, render: RenderMode) -> list[int]:
+    """Ordered engine tiers to try for this request."""
+    if render == "static":
+        return [int(Tier.STATIC)]
+    if render == "js":
+        return [int(Tier.BROWSER)]
+    # auto: start from what worked for this domain last time, escalate upward.
+    start = antibot.profiles.suggested_tier(url) if settings.antibot_enabled else int(Tier.STATIC)
+    tiers = [t for t in (int(Tier.STATIC), int(Tier.IMPERSONATE), int(Tier.BROWSER)) if t >= start]
+    return tiers or [int(Tier.BROWSER)]
+
+
+async def _run_engine(tier: int, url: str, cached: dict | None):
+    """Invoke one engine; returns (status, final_url, content_type, html, etag,
+    last_modified, not_modified, headers). Raises EngineUnavailable to skip."""
+    if tier == int(Tier.STATIC):
+        sf = await _fetch_static(url, cached=cached)
+        return (sf.status, sf.final_url, sf.content_type, sf.text, sf.etag,
+                sf.last_modified, sf.not_modified, sf.headers or {})
+    if tier == int(Tier.IMPERSONATE):
+        sf = await _fetch_impersonate(url, cached=cached)
+        return (sf.status, sf.final_url, sf.content_type, sf.text, sf.etag,
+                sf.last_modified, sf.not_modified, sf.headers or {})
+    # BROWSER
+    status, final_url, html = await _fetch_js(url)
+    return (status, final_url, None, html, None, None, False, {})
+
+
+async def _crawl_escalating(
+    url: str, render: RenderMode, cached: dict | None, result: CrawlResult
+) -> CrawlResult:
+    tiers = _tier_plan(url, render)
+    last_error: str | None = None
+
+    for i, tier in enumerate(tiers):
+        is_last = i == len(tiers) - 1
         try:
-            sf = await _fetch_static(url, cached=cached)
-            result["status"] = sf.status
-            result["final_url"] = sf.final_url
-            result["etag"] = sf.etag
-            result["last_modified"] = sf.last_modified
-            if sf.not_modified:
-                # Server says the stored copy is still current; let the caller reuse it.
-                result["not_modified"] = True
+            (status, final_url, content_type, html, etag,
+             last_modified, not_modified, headers) = await _run_engine(tier, url, cached)
+        except EngineUnavailable:
+            continue  # engine not installed/configured -> try the next tier
+        except ssrf.BlockedAddressError as exc:
+            # A redirect hit an internal address. Abort outright — never escalate
+            # to another engine, which would re-attempt the blocked target.
+            result["error"] = f"blocked: {exc}"
+            result["metadata"]["ssrf"] = str(exc)
+            return result
+        except Exception as exc:  # noqa: BLE001
+            last_error = f"{type(exc).__name__}: {exc}"
+            result["metadata"][f"tier{tier}_error"] = last_error
+            continue
+
+        result["status"] = status
+        result["final_url"] = final_url
+        result["etag"] = etag
+        result["last_modified"] = last_modified
+
+        if not_modified:
+            result["not_modified"] = True
+            return result
+
+        # Detect bot-protection blocks before paying for extraction.
+        if settings.antibot_enabled:
+            signal = antibot.detect_block(status, headers, html)
+            if signal.blocked:
+                result["metadata"]["block"] = {"vendor": signal.vendor, "reason": signal.reason}
+                antibot.profiles.record_block(url, tier, signal.vendor)
+                last_error = f"blocked by {signal.vendor}"
+                if settings.escalate_on_block and not is_last:
+                    if signal.vendor:  # rotate proxy on a hard block
+                        antibot.proxies.rotate(_host_of(url))
+                    continue
+                result["error"] = last_error
                 return result
-            if sf.text is None:
-                result["metadata"]["content_type"] = sf.content_type
-                result["metadata"]["skipped"] = "non-html or oversized body"
-            else:
-                static_html = sf.text
-                ext = await _extract(sf.text, sf.final_url)
-                result["html"] = sf.text
-                _apply_extraction(result, ext)
-        except Exception as exc:  # noqa: BLE001
-            static_error = f"{type(exc).__name__}: {exc}"
-            result["metadata"]["static_error"] = static_error
 
-    needs_js = render == "js" or (
-        render == "auto" and (static_html is None or _looks_empty(result.get("text")))
-    )
+        render_mode = "js" if tier == int(Tier.BROWSER) else "static"
 
-    if needs_js:
-        try:
-            status, final_url, html = await _fetch_js(url)
-            result["status"] = status
-            result["final_url"] = final_url
-            ext = await _extract(html, final_url)
-            result["html"] = html
-            _apply_extraction(result, ext, render_mode="js")
-        except Exception as exc:  # noqa: BLE001
-            js_error = f"{type(exc).__name__}: {exc}"
-            result["metadata"]["js_error"] = js_error
-            if static_html is None:
-                result["error"] = js_error
+        if html is None:  # non-HTML or oversized
+            result["metadata"]["content_type"] = content_type
+            result["metadata"]["skipped"] = "non-html or oversized body"
+            result["render_mode"] = render_mode
+            if settings.antibot_enabled:
+                antibot.profiles.record_success(url, tier)
+            return result
+
+        ext = await _extract(html, final_url)
+        result["html"] = html
+        _apply_extraction(result, ext, render_mode=render_mode)
+
+        # If the page looks client-rendered (empty), escalate to a stronger engine.
+        if _looks_empty(result.get("text")) and not is_last:
+            continue
+
+        if settings.antibot_enabled:
+            antibot.profiles.record_success(url, tier)
+        return result
 
     if result["error"] is None and result["status"] is None:
-        result["error"] = static_error or "fetch failed"
-
+        result["error"] = last_error or "fetch failed"
     return result
 
 

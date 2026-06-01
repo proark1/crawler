@@ -159,6 +159,33 @@ async def test_crawl_one_escalates_past_cloudflare(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_crawl_one_aborts_without_escalating_on_ssrf_redirect(monkeypatch):
+    from app import ssrf
+
+    js_called = {"n": 0}
+
+    async def blocked_static(url, cached=None):
+        raise ssrf.BlockedAddressError("example.com resolves to non-public address 10.0.0.1")
+
+    async def fake_js(url):
+        js_called["n"] += 1
+        return 200, url, "<html><body>x</body></html>"
+
+    async def allow(u):
+        return True
+
+    monkeypatch.setattr(crawler, "_fetch_static", blocked_static)
+    monkeypatch.setattr(crawler, "_fetch_js", fake_js)
+    monkeypatch.setattr(crawler, "_allowed_by_robots", allow)
+
+    res = await crawler.crawl_one("https://evil.example/x", render="auto")
+    # Must abort with an SSRF error and never escalate to the browser tier.
+    assert res["error"].startswith("blocked:")
+    assert res["metadata"].get("ssrf")
+    assert js_called["n"] == 0
+
+
+@pytest.mark.asyncio
 async def test_crawl_one_skips_non_html(monkeypatch):
     async def fake_static(url, cached=None):
         return crawler.StaticFetch(200, url, "application/pdf", None)

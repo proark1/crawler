@@ -91,8 +91,9 @@ async def resolve_validated(host: str) -> list[str]:
             raise BlockedAddressError(f"{host} resolves to non-public address {ip}")
     if settings.dns_cache_ttl > 0:
         _dns_cache[host] = (time.monotonic(), candidates)
+        # FIFO-evict the oldest entry instead of clearing (avoids a cache stampede).
         if len(_dns_cache) > 10_000:
-            _dns_cache.clear()
+            _dns_cache.pop(next(iter(_dns_cache)))
     return candidates
 
 

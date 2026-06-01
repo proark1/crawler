@@ -504,6 +504,11 @@ def _conditional_headers(headers: dict[str, str], cached: dict | None) -> dict[s
     return headers
 
 
+def _is_block(status: int | None, headers: dict[str, str], html: str | None) -> bool:
+    """True if anti-bot is on and this response looks like a block/challenge."""
+    return settings.antibot_enabled and antibot.detect_block(status, headers, html).blocked
+
+
 def _kept_headers(resp_headers) -> dict[str, str]:  # type: ignore[no-untyped-def]
     """Keep just the response headers block detection cares about."""
     keep = ("server", "cf-mitigated", "content-type", "set-cookie", "x-powered-by")
@@ -554,12 +559,14 @@ async def _fetch_static(url: str, cached: dict | None = None) -> StaticFetch:
                         304, current, resp.headers.get("content-type"),
                         None, etag, last_modified, not_modified=True, headers=kept,
                     )
-                # Genuine server errors (not 503, often a challenge) -> retry.
-                if 500 <= resp.status_code < 600 and resp.status_code != 503:
-                    resp.raise_for_status()
                 content_type = resp.headers.get("content-type")
+                is_5xx = 500 <= resp.status_code < 600
                 if not _is_html(content_type):
                     await resp.aclose()
+                    # A non-HTML 5xx that isn't a recognised block is a genuine
+                    # server error -> raise so tenacity retries it.
+                    if is_5xx and not _is_block(resp.status_code, kept, None):
+                        resp.raise_for_status()
                     return StaticFetch(
                         resp.status_code, str(resp.url), content_type, None,
                         etag, last_modified, headers=kept,
@@ -577,6 +584,10 @@ async def _fetch_static(url: str, cached: dict | None = None) -> StaticFetch:
                     chunks.append(chunk)
                 body = b"".join(chunks)
                 text = body.decode(resp.encoding or "utf-8", errors="replace")
+                # Genuine 5xx (not a bot-protection challenge) -> retry; a 5xx
+                # challenge body is returned so escalation can handle it.
+                if is_5xx and not _is_block(resp.status_code, kept, text):
+                    resp.raise_for_status()
                 return StaticFetch(
                     resp.status_code, str(resp.url), content_type, text,
                     etag, last_modified, headers=kept,
@@ -595,8 +606,6 @@ async def _fetch_impersonate(url: str, cached: dict | None = None) -> StaticFetc
     if not (_CURL_CFFI and settings.impersonate_browser):
         raise EngineUnavailable("curl_cffi not installed or impersonation disabled")
 
-    await ssrf.assert_url_allowed(url)
-    await _respect_delay(url)
     host = urlparse(url).hostname or ""
     proxy = antibot.proxies.pick(host, int(Tier.IMPERSONATE))
     # Let curl_cffi's impersonation own the fingerprint-sensitive headers
@@ -604,20 +613,34 @@ async def _fetch_impersonate(url: str, cached: dict | None = None) -> StaticFetc
     headers = _conditional_headers({"Accept-Language": settings.accept_language}, cached)
     proxies = {"http": proxy, "https": proxy} if proxy else None
 
+    # Follow redirects manually, validating every hop *before* the request, so
+    # a public URL can't redirect us into an internal service (SSRF). curl_cffi
+    # does its own DNS, so a small rebinding window remains (documented in
+    # SECURITY.md for this tier).
     async with _CurlSession() as session:
-        resp = await session.get(
-            url,
-            headers=headers,
-            impersonate=settings.impersonate_browser,
-            proxies=proxies,
-            allow_redirects=True,
-            max_redirects=settings.max_redirects,
-            timeout=settings.request_timeout,
-        )
+        current = url
+        resp = None
+        for _ in range(settings.max_redirects + 1):
+            await ssrf.assert_url_allowed(current)
+            await _respect_delay(current)
+            resp = await session.get(
+                current,
+                headers=headers,
+                impersonate=settings.impersonate_browser,
+                proxies=proxies,
+                allow_redirects=False,
+                timeout=settings.request_timeout,
+            )
+            if 300 <= resp.status_code < 400:
+                location = resp.headers.get("location")
+                if not location:
+                    raise httpx.HTTPError("redirect response missing Location header")
+                current = urljoin(current, location)
+                continue
+            break
+        else:
+            raise httpx.HTTPError(f"too many redirects (>{settings.max_redirects})")
     final_url = str(resp.url)
-    # curl_cffi does its own DNS; re-validate the landing host (rebinding caveat
-    # documented in SECURITY.md for this tier).
-    await ssrf.assert_url_allowed(final_url)
 
     resp_headers = {k.lower(): v for k, v in dict(resp.headers).items()}
     kept = _kept_headers(resp_headers)
@@ -803,6 +826,12 @@ async def _crawl_escalating(
              last_modified, not_modified, headers) = await _run_engine(tier, url, cached)
         except EngineUnavailable:
             continue  # engine not installed/configured -> try the next tier
+        except ssrf.BlockedAddressError as exc:
+            # A redirect hit an internal address. Abort outright — never escalate
+            # to another engine, which would re-attempt the blocked target.
+            result["error"] = f"blocked: {exc}"
+            result["metadata"]["ssrf"] = str(exc)
+            return result
         except Exception as exc:  # noqa: BLE001
             last_error = f"{type(exc).__name__}: {exc}"
             result["metadata"][f"tier{tier}_error"] = last_error

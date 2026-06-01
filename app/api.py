@@ -13,10 +13,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field, HttpUrl
 
-from . import crawler, db, jobs, observability
+from . import db, jobs, observability, service
 from .auth import require_api_key
 from .config import settings
-from .crawler import close_browser, crawl_one, crawl_site
+from .crawler import close_browser
 from .ratelimit import RateLimitMiddleware
 
 log = logging.getLogger("crawler.api")
@@ -146,61 +146,17 @@ def _to_page_out(d: dict) -> PageOut:
     )
 
 
-def _make_cache_lookup(store: bool):
-    if not store:
-        return None
-
-    async def lookup(url: str) -> dict | None:
-        try:
-            return await db.get_page_by_url(url)
-        except Exception:  # noqa: BLE001 -- caching is best-effort
-            return None
-
-    return lookup
-
-
 async def _run_crawl(req: CrawlRequest, on_progress=None) -> list[dict]:
-    url = str(req.url)
-    if req.follow_links:
-        results = await crawl_site(
-            url,
-            render=req.render,
-            max_depth=req.max_depth,
-            max_pages=req.max_pages,
-            same_host_only=req.same_host_only,
-            cache_lookup=_make_cache_lookup(req.store),
-            on_page_crawled=on_progress,
-        )
-    else:
-        cached = None
-        if req.store:
-            lookup = _make_cache_lookup(True)
-            row = await lookup(url) if lookup else None
-            if row and crawler.is_fresh(row, settings.recrawl_max_age):
-                return [{**row, "from_cache": True}]
-            if row:
-                cached = {"etag": row.get("etag"), "last_modified": row.get("last_modified")}
-        if cached:
-            res = await crawl_one(url, render=req.render, cached=cached)
-        else:
-            res = await crawl_one(url, render=req.render)
-        if res.get("not_modified") and req.store:
-            row = await db.get_page_by_url(url)
-            results = [row or res]
-        else:
-            results = [res]
-
-    observability.record_pages(results)
-
-    # Persist freshly crawled pages (skip rows that came straight from cache).
-    to_store = [r for r in results if not r.get("from_cache")]
-    if req.store and to_store:
-        stored = await asyncio.gather(*(db.upsert_page(r) for r in to_store))
-        stored_by_url = {s["url"]: s for s in stored}
-        results = [stored_by_url.get(r["url"], r) for r in results]
-    for r in results:
-        r.pop("html", None)
-    return [dict(r) for r in results]
+    return await service.run_crawl(
+        url=str(req.url),
+        render=req.render,
+        follow_links=req.follow_links,
+        max_depth=req.max_depth,
+        max_pages=req.max_pages,
+        same_host_only=req.same_host_only,
+        store=req.store,
+        on_progress=on_progress,
+    )
 
 
 class _nullctx:
@@ -267,6 +223,7 @@ async def create_crawl_job(req: CrawlRequest) -> JobOut:
 async def list_crawl_jobs(
     limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)
 ) -> list[JobSummary]:
+    """List recent background crawl jobs, newest first."""
     rows = await db.list_jobs(limit=limit, offset=offset)
     return [
         JobSummary(
@@ -288,6 +245,7 @@ async def list_crawl_jobs(
     dependencies=[Depends(require_api_key)],
 )
 async def get_crawl_job(job_id: str) -> JobOut:
+    """Fetch a job's status and (when finished) its crawled pages."""
     data = await jobs.load_public(job_id)
     if data is None:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -333,6 +291,7 @@ async def list_pages(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ) -> list[PageOut]:
+    """List stored pages, newest first. Total count is in the `X-Total-Count` header."""
     rows, total = await asyncio.gather(
         db.list_pages(limit=limit, offset=offset), db.count_pages()
     )
@@ -404,6 +363,7 @@ async def search_pages(
     q: str = Query(..., min_length=1),
     limit: int = Query(50, ge=1, le=200),
 ) -> list[PageOut]:
+    """Ranked full-text search over stored page titles and text (URL ILIKE fallback)."""
     rows = await db.search_pages(q, limit=limit)
     return [_to_page_out(r) for r in rows]
 
@@ -414,6 +374,7 @@ async def search_pages(
     dependencies=[Depends(require_api_key)],
 )
 async def get_page_by_url(url: str) -> PageOut:
+    """Fetch a single stored page by its exact (normalized) URL."""
     row = await db.get_page_by_url(url)
     if row is None:
         raise HTTPException(status_code=404, detail="Page not found")
@@ -427,6 +388,7 @@ async def get_page_by_url(url: str) -> PageOut:
     dependencies=[Depends(require_api_key)],
 )
 async def get_page(page_id: int) -> PageOut:
+    """Fetch a single stored page by id."""
     row = await db.get_page_by_id(page_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Page not found")
@@ -440,6 +402,7 @@ async def get_page(page_id: int) -> PageOut:
     dependencies=[Depends(require_api_key)],
 )
 async def get_page_raw_html(page_id: int) -> PlainTextResponse:
+    """Return the stored (decompressed) raw HTML for a page."""
     html = await db.get_page_html(page_id)
     if html is None:
         raise HTTPException(status_code=404, detail="No stored HTML for this page")
@@ -452,6 +415,7 @@ async def get_page_raw_html(page_id: int) -> PlainTextResponse:
     dependencies=[Depends(require_api_key)],
 )
 async def delete_page(page_id: int) -> Response:
+    """Delete a stored page by id."""
     deleted = await db.delete_page(page_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Page not found")

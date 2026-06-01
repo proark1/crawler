@@ -70,14 +70,57 @@ Structured JSON logs, Prometheus metrics at `/metrics`, and optional Sentry
 | GET    | `/pages` | List stored pages (paginated, `X-Total-Count` header) |
 | GET    | `/pages/export?format=` | Export all pages as `json`/`csv`/`md` |
 | GET    | `/pages/search?q=` | Ranked full-text search |
+| GET    | `/pages/by-url?url=` | Fetch one page by exact URL |
 | GET    | `/pages/{id}` | Fetch one page |
 | GET    | `/pages/{id}/html` | Raw stored HTML |
 | DELETE | `/pages/{id}` | Delete one page |
 
 All endpoints except `/health` require `X-API-Key` when `API_KEY` is set.
 
-Schema changes are applied automatically on startup by the migration runner in
-`app/migrations.py`.
+Interactive, always-current API docs are served by FastAPI at **`/docs`**
+(Swagger UI) and **`/redoc`**, with the raw schema at **`/openapi.json`**.
+
+The REST API and the MCP server share one crawl implementation
+(`app/service.py`), so both apply identical SSRF, robots, caching, and
+persistence behavior. Schema changes are applied automatically on startup by the
+migration runner in `app/migrations.py`.
+
+## MCP server
+
+A stdio [Model Context Protocol](https://modelcontextprotocol.io) server exposes
+the crawler to MCP clients (Claude Desktop, IDEs, etc.):
+
+```bash
+python -m app.mcp_server
+```
+
+| Tool | Arguments | Description |
+| ---- | --------- | ----------- |
+| `crawl` | `url`, `render`, `follow_links`, `max_depth`, `max_pages`, `same_host_only`, `store` | Crawl a URL (or same-host BFS); returns text, Markdown, links, metadata |
+| `get_page` | `url` | Retrieve a stored page (no raw HTML) |
+| `get_page_html` | `url` | Retrieve the stored raw HTML |
+| `list_recent` | `limit` | Recently crawled pages |
+| `search` | `query`, `limit` | Full-text search |
+| `recent_jobs` | `limit` | Recent background crawl jobs |
+| `stats` | — | Index statistics (total pages) |
+| `delete_page` | `url` | Delete a stored page |
+
+Example Claude Desktop config (`claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "crawler": {
+      "command": "python",
+      "args": ["-m", "app.mcp_server"],
+      "env": { "DATABASE_URL": "postgresql://postgres:postgres@localhost:5432/crawler" }
+    }
+  }
+}
+```
+
+See `SECURITY.md` for the threat model (SSRF, DNS-rebinding mitigation, auth,
+rate limiting). All tunables are documented in `.env.example`.
 
 ## Frontend
 

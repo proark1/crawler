@@ -84,7 +84,22 @@ export default async function PagesIndex({
         >
           Search
         </button>
+        {q && (
+          <Link
+            href="/pages"
+            className="inline-flex items-center rounded-lg border border-neutral-200 bg-white px-4 py-2 text-sm font-medium text-neutral-700 hover:bg-neutral-50 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-300 dark:hover:bg-neutral-800"
+          >
+            Clear search
+          </Link>
+        )}
       </form>
+
+      {q && (
+        <p className="text-xs text-neutral-400 dark:text-neutral-500">
+          Showing up to {total} matching {total === 1 ? "page" : "pages"} for “{q}”. Search results
+          are not paginated — refine your query to narrow them down.
+        </p>
+      )}
 
       <PagesTable pages={rows} />
 

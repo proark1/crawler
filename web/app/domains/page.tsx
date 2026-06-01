@@ -1,4 +1,5 @@
 import { api, type DomainProfile } from "@/lib/api";
+import Time from "../components/time";
 
 export const dynamic = "force-dynamic";
 
@@ -57,8 +58,8 @@ export default async function DomainsPage() {
                     <span className="ml-2 text-xs text-red-500">{d.last_vendor}</span>
                   )}
                 </td>
-                <td suppressHydrationWarning className="px-5 py-3 text-xs text-neutral-500 dark:text-neutral-400">
-                  {d.last_block_at ? new Date(d.last_block_at * 1000).toLocaleString() : "—"}
+                <td className="px-5 py-3 text-xs text-neutral-500 dark:text-neutral-400">
+                  <Time iso={d.last_block_at ? new Date(d.last_block_at * 1000).toISOString() : null} />
                 </td>
               </tr>
             ))}

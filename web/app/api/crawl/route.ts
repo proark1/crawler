@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { api } from "@/lib/api";
+import { api, describeApiError } from "@/lib/api";
 
 export async function POST(req: Request) {
   try {
@@ -7,10 +7,7 @@ export async function POST(req: Request) {
     const result = await api.crawl(body);
     return NextResponse.json(result);
   } catch (err) {
-    console.error("crawl failed", err);
-    return NextResponse.json(
-      { error: "Crawl failed. Check the URL and try again." },
-      { status: 502 },
-    );
+    const { message, status } = describeApiError(err, "Crawl failed. Check the URL and try again.");
+    return NextResponse.json({ error: message }, { status });
   }
 }

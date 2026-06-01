@@ -5,8 +5,14 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     environment: str = "development"  # "production" enables fail-closed checks
+    api_version: str = "v1"  # endpoints are served at both / and /{api_version}/
 
     database_url: str = "postgresql://postgres:postgres@localhost:5432/crawler"
+    # Connection pool sizing and timeouts (bound how long a request waits on the DB).
+    db_pool_min_size: int = 1
+    db_pool_max_size: int = 10
+    db_command_timeout: float = 30.0  # per-query timeout (seconds)
+    db_acquire_timeout: float = 10.0  # max wait for a free pooled connection
     request_timeout: float = 20.0
     js_render_timeout: float = 30.0
     user_agent: str = "CrawlerBot/0.1 (+https://github.com/proark1/crawler)"
@@ -99,9 +105,17 @@ class Settings(BaseSettings):
     respect_robots: bool = True
     respect_crawl_delay: bool = True
     per_host_delay: float = 0.0  # extra seconds between requests to the same host
+    robots_cache_ttl: float = 3600.0  # re-fetch robots.txt after this many seconds
+    # Bounds on per-host bookkeeping maps (politeness locks, cookie jars, robots).
+    host_cache_size: int = 4096
 
     # Rate limiting (per client IP). 0 = disabled.
     rate_limit_per_minute: int = 0
+
+    # Background jobs.
+    webhook_secret: str = ""  # if set, sign webhook payloads with HMAC-SHA256
+    webhook_retries: int = 3  # delivery attempts before giving up (exponential backoff)
+    job_pages_inline_limit: int = 200  # cap pages embedded in a job response payload
 
     # Observability.
     enable_metrics: bool = True

@@ -4,7 +4,6 @@ import asyncio
 import hashlib
 import json
 import time
-from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -25,6 +24,7 @@ from tenacity import (
 from . import antibot, concurrency, httpclient, observability, pdfextract, solver, ssrf, textmeta
 from .antibot import Tier
 from .config import settings
+from .lrucache import BoundedLRU, TTLCache
 
 if TYPE_CHECKING:
     from concurrent.futures import ProcessPoolExecutor
@@ -38,12 +38,16 @@ _pw: Playwright | None = None
 _browser: Browser | None = None
 _browser_lock = asyncio.Lock()
 
-# Per-host politeness: serialize the delay window per netloc.
-_host_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
-_host_last_hit: dict[str, float] = {}
+# Per-host politeness: serialize the delay window per netloc. Bounded so a
+# high-cardinality crawl can't accumulate one Lock per host forever.
+_host_locks: BoundedLRU[str, asyncio.Lock] = BoundedLRU(settings.host_cache_size)
+_host_last_hit: BoundedLRU[str, float] = BoundedLRU(settings.host_cache_size)
 
-# Cache of parsed robots.txt per scheme+host so we fetch it at most once.
-_robots_cache: dict[str, RobotFileParser | None] = {}
+# Cache of parsed robots.txt per scheme+host, with a TTL so policy changes are
+# eventually picked up rather than honored stale until the next restart.
+_robots_cache: TTLCache[str, RobotFileParser | None] = TTLCache(
+    settings.host_cache_size, settings.robots_cache_ttl
+)
 _robots_lock = asyncio.Lock()
 
 # Content types we will attempt to parse as HTML.
@@ -507,11 +511,13 @@ async def _get_robots(url: str) -> RobotFileParser | None:
     """Fetch and cache robots.txt for the URL's origin. None means 'no rules / allow'."""
     parts = urlparse(url)
     origin = f"{parts.scheme}://{parts.netloc}"
-    if origin in _robots_cache:
-        return _robots_cache[origin]
+    cached = _robots_cache.get(origin)
+    if cached is not None:
+        return None if cached is False else cached
     async with _robots_lock:
-        if origin in _robots_cache:
-            return _robots_cache[origin]
+        cached = _robots_cache.get(origin)
+        if cached is not None:
+            return None if cached is False else cached
         rp: RobotFileParser | None = RobotFileParser()
         robots_url = f"{origin}/robots.txt"
         try:
@@ -528,7 +534,7 @@ async def _get_robots(url: str) -> RobotFileParser | None:
                 rp.parse(resp.text.splitlines())
         except Exception:  # noqa: BLE001 -- unreachable robots.txt -> fail open
             rp = None
-        _robots_cache[origin] = rp
+        _robots_cache.set(origin, rp if rp is not None else False)
         return rp
 
 
@@ -661,14 +667,15 @@ async def _respect_delay(url: str) -> None:
     if delay <= 0:
         return
     host = urlparse(url).netloc
-    async with _host_locks[host]:
+    lock = _host_locks.setdefault(host, asyncio.Lock())
+    async with lock:
         last = _host_last_hit.get(host)
         now = time.monotonic()
         if last is not None:
             wait = delay - (now - last)
             if wait > 0:
                 await asyncio.sleep(wait)
-        _host_last_hit[host] = time.monotonic()
+        _host_last_hit.set(host, time.monotonic())
 
 
 def _is_transient(exc: BaseException) -> bool:
@@ -693,8 +700,16 @@ def _conditional_headers(headers: dict[str, str], cached: dict | None) -> dict[s
     return headers
 
 
+# "Not found" / "gone" responses are genuine results, not bot challenges; a
+# custom 404 page whose body happens to contain a challenge-like phrase
+# ("just a moment", ...) must not trigger wasteful tier escalation.
+_NON_BLOCK_STATUSES = {404, 410}
+
+
 def _is_block(status: int | None, headers: dict[str, str], html: str | None) -> bool:
     """True if anti-bot is on and this response looks like a block/challenge."""
+    if status in _NON_BLOCK_STATUSES:
+        return False
     return settings.antibot_enabled and antibot.detect_block(status, headers, html).blocked
 
 
@@ -762,6 +777,7 @@ async def _fetch_static(url: str, cached: dict | None = None) -> StaticFetch:
     )
     async def _do() -> StaticFetch:
         current = url
+        seen_redirects: set[str] = set()
         for _ in range(settings.max_redirects + 1):
             await ssrf.assert_url_allowed(current)
             await _respect_delay(current)
@@ -770,7 +786,11 @@ async def _fetch_static(url: str, cached: dict | None = None) -> StaticFetch:
                     location = resp.headers.get("location")
                     if not location:
                         raise httpx.HTTPError("redirect response missing Location header")
-                    current = urljoin(current, location)
+                    nxt = urljoin(current, location)
+                    if nxt in seen_redirects:
+                        raise httpx.HTTPError(f"redirect loop detected at {nxt}")
+                    seen_redirects.add(nxt)
+                    current = nxt
                     continue
 
                 etag = resp.headers.get("etag")
@@ -849,6 +869,7 @@ async def _fetch_impersonate(url: str, cached: dict | None = None) -> StaticFetc
     async with _CurlSession() as session:
         current = url
         resp = None
+        seen_redirects: set[str] = set()
         for _ in range(settings.max_redirects + 1):
             await ssrf.assert_url_allowed(current)
             await _respect_delay(current)
@@ -864,7 +885,11 @@ async def _fetch_impersonate(url: str, cached: dict | None = None) -> StaticFetc
                 location = resp.headers.get("location")
                 if not location:
                     raise httpx.HTTPError("redirect response missing Location header")
-                current = urljoin(current, location)
+                nxt = urljoin(current, location)
+                if nxt in seen_redirects:
+                    raise httpx.HTTPError(f"redirect loop detected at {nxt}")
+                seen_redirects.add(nxt)
+                current = nxt
                 continue
             break
         else:
@@ -897,7 +922,7 @@ async def _fetch_impersonate(url: str, cached: dict | None = None) -> StaticFetc
 
 # Per-host cookie jars (bounded), so a domain that "challenges once, then allows"
 # keeps its clearance cookie across renders.
-_cookie_jars: dict[str, list] = {}
+_cookie_jars: BoundedLRU[str, list] = BoundedLRU(settings.host_cache_size)
 
 
 def _host_of(url: str) -> str:
@@ -915,18 +940,22 @@ async def _fetch_js(url: str) -> tuple[int, str, str]:
     if dedicated:
         browser = await get_browser()
         context = await browser.new_context(**_context_kwargs(proxy))
-        if settings.browser_stealth:
-            await context.add_init_script(_STEALTH_JS)
-        await context.route("**/*", _route_request)
     else:
         context = await _context_pool.acquire()
 
     page = None
     try:
+        if dedicated:
+            # Set up the dedicated context inside the try so a failure here can't
+            # leak the context (the finally still closes it).
+            if settings.browser_stealth:
+                await context.add_init_script(_STEALTH_JS)
+            await context.route("**/*", _route_request)
         await _respect_delay(url)
-        if settings.persist_cookies and _cookie_jars.get(host):
+        saved = _cookie_jars.get(host) if settings.persist_cookies else None
+        if saved:
             try:
-                await context.add_cookies(_cookie_jars[host])
+                await context.add_cookies(saved)
             except Exception:  # noqa: BLE001
                 pass
         page = await context.new_page()
@@ -949,9 +978,7 @@ async def _fetch_js(url: str) -> tuple[int, str, str]:
             try:
                 jar = await context.cookies()
                 if jar:
-                    _cookie_jars[host] = jar
-                    if len(_cookie_jars) > 5000:
-                        _cookie_jars.pop(next(iter(_cookie_jars)))
+                    _cookie_jars.set(host, jar)
             except Exception:  # noqa: BLE001
                 pass
         return status, final_url, html
@@ -1056,7 +1083,7 @@ async def _run_engine(tier: int, url: str, cached: dict | None):
             raise EngineUnavailable(str(exc)) from exc
         await ssrf.assert_url_allowed(res.url)
         if settings.persist_cookies and res.cookies:
-            _cookie_jars[host] = res.cookies  # reuse clearance cookies in later renders
+            _cookie_jars.set(host, res.cookies)  # reuse clearance cookies in later renders
         return (res.status, res.url, None, res.html, None, None, False, {}, "html")
     # BROWSER
     status, final_url, html = await _fetch_js(url)
@@ -1111,7 +1138,8 @@ async def _crawl_escalating(
             return result
 
         # Detect bot-protection blocks before paying for extraction.
-        if settings.antibot_enabled:
+        # Skip 404/410: a "not found" page is a real result, not a challenge.
+        if settings.antibot_enabled and status not in _NON_BLOCK_STATUSES:
             signal = antibot.detect_block(status, headers, html)
             if signal.blocked:
                 result["metadata"]["block"] = {"vendor": signal.vendor, "reason": signal.reason}

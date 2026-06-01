@@ -88,12 +88,15 @@ Structured JSON logs, Prometheus metrics at `/metrics`, and optional Sentry
 | Method | Path | Description |
 | ------ | ---- | ----------- |
 | GET    | `/health` | Liveness + DB connectivity |
+| GET    | `/ready` | Readiness — 503 when the DB is unreachable |
 | GET    | `/metrics` | Prometheus metrics (incl. per-vendor/tier block counts) |
 | GET    | `/stats` | Index aggregates: total / errored / bot-blocked pages |
 | POST   | `/crawl` | Synchronous crawl (single page / small BFS) |
-| POST   | `/crawl/jobs` | Submit a background crawl (optional `webhook_url`) |
+| POST   | `/crawl/jobs` | Submit a background crawl (optional `webhook_url`; `Idempotency-Key` supported) |
+| POST   | `/crawl/batch` | Submit many URLs at once (one job each) |
 | GET    | `/crawl/jobs` | List recent jobs |
 | GET    | `/crawl/jobs/{id}` | Poll job status / results |
+| DELETE | `/crawl/jobs/{id}` | Cancel a running job |
 | GET    | `/crawl/jobs/{id}/stream` | Live progress via Server-Sent Events |
 | GET    | `/domains` | Per-domain anti-bot strategy the crawler has learned |
 | GET    | `/pages` | List stored pages (paginated, `X-Total-Count` header) |
@@ -104,7 +107,10 @@ Structured JSON logs, Prometheus metrics at `/metrics`, and optional Sentry
 | GET    | `/pages/{id}/html` | Raw stored HTML |
 | DELETE | `/pages/{id}` | Delete one page |
 
-All endpoints except `/health` require `X-API-Key` when `API_KEY` is set.
+Every endpoint is also served under `/v1` (configurable via `API_VERSION`), e.g.
+`/v1/crawl`. All endpoints except `/health` and `/ready` require `X-API-Key`
+when `API_KEY` is set. Webhook payloads are HMAC-SHA256 signed (header
+`X-Crawler-Signature`) when `WEBHOOK_SECRET` is configured.
 
 Interactive, always-current API docs are served by FastAPI at **`/docs`**
 (Swagger UI) and **`/redoc`**, with the raw schema at **`/openapi.json`**.

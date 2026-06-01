@@ -2,6 +2,45 @@
 
 All notable changes to this project are documented here. Dates are UTC.
 
+## 0.5.0
+
+Hardening and API-completeness pass focused on sustained-load reliability,
+correctness edges, and operability.
+
+### Reliability
+- Per-host bookkeeping (politeness locks, cookie jars, robots parsers) is now
+  bounded via an LRU/TTL cache (`app/lrucache.py`) — no more unbounded growth on
+  high-cardinality crawls. robots.txt is re-fetched after `ROBOTS_CACHE_TTL`.
+- Dedicated headless-browser contexts are closed even if their setup fails.
+- Database pool gained a bounded acquire timeout and per-query command timeout;
+  `PostgresError` and pool-acquire timeouts now return **503** instead of 500.
+- New `/ready` readiness probe (503 when the DB is unreachable); `/health`
+  remains a liveness probe.
+- Prometheus HTTP metrics label by route template, fixing label-cardinality
+  growth from per-id paths.
+
+### Correctness
+- Redirect-loop detection in the static and impersonation fetch paths.
+- 404/410 responses are never classified as bot blocks, avoiding wasteful tier
+  escalation on custom not-found pages.
+
+### API
+- All endpoints are also served under `/{API_VERSION}` (default `/v1`).
+- `POST /crawl/batch` submits many URLs as individual jobs.
+- `DELETE /crawl/jobs/{id}` cancels a running job (new `cancelled` status).
+- `Idempotency-Key` header on job creation returns the original job on retry.
+- Job responses cap embedded pages at `JOB_PAGES_INLINE_LIMIT` (count stays exact).
+
+### Jobs
+- Webhook delivery is HMAC-SHA256 signed (`WEBHOOK_SECRET`) and retried with
+  exponential backoff.
+
+### Dashboard
+- Live, indeterminate crawl progress; mid-crawl cancel; timezone-correct
+  timestamps (no hydration mismatch); auto-refreshing sidebar stats; clearer,
+  actionable error messages; command-palette focus trap and reduced-motion
+  support; empty-state calls-to-action.
+
 ## 0.4.0
 
 A series of improvements taking the service from a minimal crawler to a

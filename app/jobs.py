@@ -8,6 +8,9 @@ best-effort: if the database is unreachable the in-memory job still works.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
+import json
 import logging
 import time
 import uuid
@@ -17,10 +20,11 @@ from typing import Any, Literal
 import httpx
 
 from . import db
+from .config import settings
 
 log = logging.getLogger("crawler.jobs")
 
-JobStatus = Literal["pending", "running", "done", "error"]
+JobStatus = Literal["pending", "running", "done", "error", "cancelled"]
 
 _JOB_TTL_SECONDS = 60 * 60  # keep finished jobs in memory for an hour
 _MAX_JOBS = 500
@@ -144,13 +148,47 @@ async def load_public(job_id: str) -> dict[str, Any] | None:
 
 
 async def fire_webhook(job: Job) -> None:
+    """Deliver the job result to its webhook, optionally HMAC-signed, with retries.
+
+    Signing lets the receiver verify authenticity (X-Crawler-Signature is the
+    hex HMAC-SHA256 of the raw body using ``webhook_secret``). Delivery is retried
+    with exponential backoff so a brief receiver outage doesn't drop the event.
+    """
     if not job.webhook_url:
         return
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
-            await client.post(job.webhook_url, json=job.public())
-    except Exception as exc:  # noqa: BLE001
-        log.warning("webhook delivery failed for job %s: %s", job.id, exc)
+    body = json.dumps(job.public(), default=str).encode()
+    headers = {"Content-Type": "application/json"}
+    if settings.webhook_secret:
+        sig = hmac.new(settings.webhook_secret.encode(), body, hashlib.sha256).hexdigest()
+        headers["X-Crawler-Signature"] = f"sha256={sig}"
+
+    attempts = max(1, settings.webhook_retries)
+    for attempt in range(attempts):
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
+                resp = await client.post(job.webhook_url, content=body, headers=headers)
+            if resp.status_code < 500:
+                return  # delivered (2xx/3xx/4xx are all "the receiver got it")
+            raise httpx.HTTPStatusError("server error", request=resp.request, response=resp)
+        except Exception as exc:  # noqa: BLE001
+            if attempt + 1 >= attempts:
+                log.warning(
+                    "webhook delivery failed for job %s after %d attempts: %s",
+                    job.id, attempts, exc,
+                )
+                return
+            await asyncio.sleep(min(30.0, 2.0**attempt))
+
+
+async def cancel(job_id: str) -> bool:
+    """Cancel a running job. Returns False if unknown or already finished."""
+    job = _jobs.get(job_id)
+    if job is None or job.status in ("done", "error", "cancelled"):
+        return False
+    if job._task is not None and not job._task.done():
+        job._task.cancel()
+    await mark(job, status="cancelled", error="cancelled by request")
+    return True
 
 
 async def cancel_all() -> None:

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { api } from "@/lib/api";
+import { api, describeApiError } from "@/lib/api";
 
 export async function POST(req: Request) {
   try {
@@ -7,10 +7,7 @@ export async function POST(req: Request) {
     const job = await api.createJob(body);
     return NextResponse.json(job, { status: 202 });
   } catch (err) {
-    console.error("create job failed", err);
-    return NextResponse.json(
-      { error: "Could not start the crawl. Please try again." },
-      { status: 502 },
-    );
+    const { message, status } = describeApiError(err, "Could not start the crawl. Please try again.");
+    return NextResponse.json({ error: message }, { status });
   }
 }

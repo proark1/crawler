@@ -327,6 +327,29 @@ def test_content_hash_stable_and_none():
     assert h1 == h2 and len(h1) == 64
 
 
+def test_cache_max_age_parsing():
+    assert crawler._cache_max_age(None) is None
+    assert crawler._cache_max_age({"cache-control": "public, max-age=3600"}) == 3600
+    assert crawler._cache_max_age({"cache-control": "max-age=3600", "age": "600"}) == 3000
+    assert crawler._cache_max_age({"cache-control": "no-store"}) == 0
+    assert crawler._cache_max_age({"cache-control": "no-cache"}) == 0
+    assert crawler._cache_max_age({"cache-control": "private"}) is None
+    assert crawler._cache_max_age({}) is None
+
+
+def test_is_fresh_honors_cache_headers(monkeypatch):
+    from datetime import datetime, timedelta
+
+    monkeypatch.setattr(settings, "honor_cache_headers", True)
+    recent = (datetime.now(UTC) - timedelta(seconds=30)).isoformat()
+    # Global TTL is 0, but the server said max-age=3600 -> still fresh.
+    row = {"fetched_at": recent, "metadata": {"cache_max_age": 3600}}
+    assert crawler.is_fresh(row, 0)
+    # no-store (cache_max_age 0) -> never fresh.
+    row2 = {"fetched_at": recent, "metadata": {"cache_max_age": 0}}
+    assert not crawler.is_fresh(row2, 0)
+
+
 def test_is_fresh_logic():
     from datetime import datetime, timedelta
 

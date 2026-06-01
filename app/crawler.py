@@ -699,14 +699,47 @@ def _is_block(status: int | None, headers: dict[str, str], html: str | None) -> 
 
 
 def _kept_headers(resp_headers) -> dict[str, str]:  # type: ignore[no-untyped-def]
-    """Keep just the response headers block detection cares about."""
-    keep = ("server", "cf-mitigated", "content-type", "set-cookie", "x-powered-by")
+    """Keep just the response headers block detection / caching care about."""
+    keep = (
+        "server", "cf-mitigated", "content-type", "set-cookie", "x-powered-by",
+        "cache-control", "age",
+    )
     out: dict[str, str] = {}
     for k in keep:
         v = resp_headers.get(k)
         if v:
             out[k] = v
     return out
+
+
+def _cache_max_age(headers: dict[str, str] | None) -> int | None:
+    """Effective freshness lifetime (seconds) from Cache-Control/Age, or None.
+
+    Returns 0 for no-store/no-cache so such pages are never treated as fresh.
+    """
+    if not headers:
+        return None
+    cc = (headers.get("cache-control") or "").lower()
+    if not cc:
+        return None
+    if "no-store" in cc or "no-cache" in cc:
+        return 0
+    max_age = None
+    for part in cc.split(","):
+        part = part.strip()
+        if part.startswith("max-age="):
+            try:
+                max_age = int(part.split("=", 1)[1])
+            except ValueError:
+                return None
+            break
+    if max_age is None:
+        return None
+    try:
+        age = int(headers.get("age", "0") or 0)
+    except ValueError:
+        age = 0
+    return max(0, max_age - age)
 
 
 async def _fetch_static(url: str, cached: dict | None = None) -> StaticFetch:
@@ -1093,6 +1126,13 @@ async def _crawl_escalating(
                 result["error"] = last_error
                 return result
 
+        # Record the server's freshness directive (Cache-Control/Age) so future
+        # conditional re-crawls can honor it per page.
+        if settings.honor_cache_headers:
+            cm = _cache_max_age(headers)
+            if cm is not None:
+                result["metadata"]["cache_max_age"] = cm
+
         # PDF: `html` holds the extracted plain text; store it directly without
         # running the HTML extractor over it.
         if kind == "pdf":
@@ -1173,7 +1213,16 @@ def _host_key(url: str) -> str:
 
 
 def _is_fresh(row: dict, max_age: float) -> bool:
-    if max_age <= 0 or row.get("error"):
+    if row.get("error"):
+        return False
+    # Honor the server's own Cache-Control max-age (per page) in addition to the
+    # configured global TTL; the larger of the two wins.
+    effective = max_age
+    if settings.honor_cache_headers:
+        cm = (row.get("metadata") or {}).get("cache_max_age")
+        if isinstance(cm, (int, float)) and cm > effective:
+            effective = cm
+    if effective <= 0:
         return False
     fetched = row.get("fetched_at")
     if not fetched:
@@ -1185,7 +1234,7 @@ def _is_fresh(row: dict, max_age: float) -> bool:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=UTC)
     age = (datetime.now(UTC) - dt).total_seconds()
-    return age < max_age
+    return age < effective
 
 
 def _row_to_result(row: dict) -> CrawlResult:

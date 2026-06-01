@@ -86,6 +86,7 @@ class Settings(BaseSettings):
     # Extraction.
     extract_metadata: bool = True  # OpenGraph / JSON-LD / canonical / language
     emit_markdown: bool = True  # include a Markdown rendering of the main content
+    extract_pdf: bool = True  # extract text from PDF responses (needs the [pdf] extra)
 
     # Discovery: seed follow-link crawls from sitemap.xml / robots Sitemap: lines.
     use_sitemap: bool = True

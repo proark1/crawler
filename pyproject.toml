@@ -24,6 +24,8 @@ dependencies = [
 impersonate = ["curl_cffi>=0.7"]
 # Stealth-patched headless browser (Tier 2 anti-bot engine).
 stealth = ["patchright>=1.0"]
+# PDF text extraction.
+pdf = ["pypdf>=4.0"]
 sentry = ["sentry-sdk>=2.0"]
 dev = [
     "pytest>=8.0",

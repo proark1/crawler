@@ -80,7 +80,8 @@ Structured JSON logs, Prometheus metrics at `/metrics`, and optional Sentry
 | Method | Path | Description |
 | ------ | ---- | ----------- |
 | GET    | `/health` | Liveness + DB connectivity |
-| GET    | `/metrics` | Prometheus metrics |
+| GET    | `/metrics` | Prometheus metrics (incl. per-vendor/tier block counts) |
+| GET    | `/stats` | Index aggregates: total / errored / bot-blocked pages |
 | POST   | `/crawl` | Synchronous crawl (single page / small BFS) |
 | POST   | `/crawl/jobs` | Submit a background crawl (optional `webhook_url`) |
 | GET    | `/crawl/jobs` | List recent jobs |

@@ -98,7 +98,7 @@ function NavLink({
 }
 
 function IndexStatus() {
-  const [total, setTotal] = useState<number | null>(null);
+  const [stats, setStats] = useState<{ total: number; errors: number; blocked: number } | null>(null);
   const [ok, setOk] = useState(true);
 
   useEffect(() => {
@@ -108,7 +108,7 @@ function IndexStatus() {
       .then((d) => {
         if (!alive) return;
         if (d.total == null) setOk(false);
-        else setTotal(d.total);
+        else setStats(d);
       })
       .catch(() => alive && setOk(false));
     return () => {
@@ -125,12 +125,18 @@ function IndexStatus() {
         <span className={`h-2 w-2 rounded-full ${ok ? "bg-emerald-500" : "bg-neutral-300"}`} aria-hidden />
         {ok ? (
           <span>
-            {total != null ? total.toLocaleString() : "—"} page{total === 1 ? "" : "s"} stored
+            {stats ? stats.total.toLocaleString() : "—"} page{stats?.total === 1 ? "" : "s"} stored
           </span>
         ) : (
           <span>Service unreachable</span>
         )}
       </div>
+      {ok && stats && (stats.blocked > 0 || stats.errors > 0) && (
+        <div className="mt-1 flex gap-3 text-[11px] text-neutral-500 dark:text-neutral-400">
+          {stats.errors > 0 && <span>{stats.errors.toLocaleString()} errored</span>}
+          {stats.blocked > 0 && <span>{stats.blocked.toLocaleString()} blocked</span>}
+        </div>
+      )}
     </div>
   );
 }

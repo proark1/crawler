@@ -83,6 +83,14 @@ MIGRATIONS: list[tuple[int, str, str]] = [
         CREATE INDEX IF NOT EXISTS crawl_jobs_created_at_idx ON crawl_jobs (created_at DESC);
         """,
     ),
+    (
+        5,
+        "partial indexes for /stats aggregates",
+        """
+        CREATE INDEX IF NOT EXISTS pages_errors_idx ON pages (id) WHERE error IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS pages_blocked_idx ON pages (id) WHERE metadata ? 'block';
+        """,
+    ),
 ]
 
 

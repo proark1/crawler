@@ -114,9 +114,5 @@ export const api = {
     rawFetch(`/pages/${id}`, { method: "DELETE" }).then(() => undefined),
   exportStream: (format: "json" | "csv" | "md") =>
     rawFetch(`/pages/export?format=${format}`),
-  stats: async (): Promise<{ total: number }> => {
-    const res = await rawFetch(`/pages?limit=1&offset=0`);
-    await res.text();
-    return { total: Number(res.headers.get("X-Total-Count") ?? "0") };
-  },
+  stats: () => apiFetch<{ total: number; errors: number; blocked: number }>(`/stats`),
 };

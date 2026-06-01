@@ -74,6 +74,23 @@ async def test_upsert_search_and_html_roundtrip():
     assert await db.get_page_by_id(pid) is None
 
 
+async def test_stats_aggregate():
+    from app import db
+
+    ok = _page("https://x.com/ok", "OK", "fine")
+    err = _page("https://x.com/err", "E", "")
+    err["error"] = "boom"
+    blocked = _page("https://x.com/blk", "B", "")
+    blocked["metadata"] = {"block": {"vendor": "cloudflare"}}
+    for p in (ok, err, blocked):
+        await db.upsert_page(p)
+
+    s = await db.stats()
+    assert s["total"] == 3
+    assert s["errors"] == 1
+    assert s["blocked"] == 1
+
+
 async def test_upsert_is_idempotent_on_url():
     from app import db
 

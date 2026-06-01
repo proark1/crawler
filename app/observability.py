@@ -74,8 +74,11 @@ if _PROM and settings.enable_metrics:
     HTTP_REQUESTS = Counter(
         "crawler_http_requests_total", "API requests", ["method", "path", "status"]
     )
+    BLOCKS = Counter(
+        "crawler_blocks_total", "Bot-protection blocks detected", ["vendor", "tier"]
+    )
 else:  # pragma: no cover - exercised only when prometheus is absent
-    CRAWL_PAGES = CRAWL_DURATION = HTTP_REQUESTS = None
+    CRAWL_PAGES = CRAWL_DURATION = HTTP_REQUESTS = BLOCKS = None
 
 
 def record_pages(pages: list[dict]) -> None:
@@ -84,6 +87,12 @@ def record_pages(pages: list[dict]) -> None:
     for p in pages:
         outcome = "error" if p.get("error") else "ok"
         CRAWL_PAGES.labels(render_mode=p.get("render_mode", "unknown"), outcome=outcome).inc()
+
+
+def record_block(vendor: str | None, tier: int) -> None:
+    if BLOCKS is None:
+        return
+    BLOCKS.labels(vendor=vendor or "unknown", tier=str(tier)).inc()
 
 
 def record_http(method: str, path: str, status: int) -> None:

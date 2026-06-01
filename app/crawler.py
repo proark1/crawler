@@ -22,7 +22,7 @@ from tenacity import (
     wait_exponential,
 )
 
-from . import antibot, concurrency, httpclient, solver, ssrf
+from . import antibot, concurrency, httpclient, observability, solver, ssrf
 from .antibot import Tier
 from .config import settings
 
@@ -952,6 +952,7 @@ async def _crawl_escalating(
                 result["metadata"]["block"] = {"vendor": signal.vendor, "reason": signal.reason}
                 antibot.profiles.record_block(url, tier, signal.vendor)
                 concurrency.limiter.record_block(host)  # back off / trip breaker
+                observability.record_block(signal.vendor, tier)
                 last_error = f"blocked by {signal.vendor}"
                 if settings.escalate_on_block and not is_last:
                     if signal.vendor:  # rotate proxy on a hard block

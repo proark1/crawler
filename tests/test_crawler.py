@@ -130,6 +130,14 @@ async def test_tier_plan_by_render_mode():
 
 
 @pytest.mark.asyncio
+async def test_tier_plan_includes_solver_when_configured(monkeypatch):
+    monkeypatch.setattr(settings, "flaresolverr_url", "")
+    assert 3 not in crawler._tier_plan("https://nosolver.com", "auto")
+    monkeypatch.setattr(settings, "flaresolverr_url", "http://flaresolverr:8191")
+    assert crawler._tier_plan("https://withsolver.com", "auto")[-1] == 3  # SOLVER last
+
+
+@pytest.mark.asyncio
 async def test_crawl_one_escalates_past_cloudflare(monkeypatch):
     cf = "<html><head><title>Just a moment...</title></head><body>cf-chl</body></html>"
 

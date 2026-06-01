@@ -102,3 +102,17 @@ async def test_job_persistence_roundtrip():
     assert len(row["pages"]) == 1
     jobs_list = await db.list_jobs()
     assert any(j["id"] == "job1" for j in jobs_list)
+
+
+async def test_reap_orphaned_jobs():
+    from app import db
+
+    await db.upsert_job({
+        "id": "stuck", "status": "running", "progress": 1, "total": 5,
+        "request": {}, "pages": [], "error": None, "webhook_url": None,
+    })
+    reaped = await db.reap_orphaned_jobs()
+    assert reaped >= 1
+    row = await db.get_job_row("stuck")
+    assert row["status"] == "error"
+    assert "orphaned" in row["error"]

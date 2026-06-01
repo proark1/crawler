@@ -22,11 +22,13 @@ from tenacity import (
     wait_exponential,
 )
 
-from . import antibot, httpclient, ssrf
+from . import antibot, concurrency, httpclient, solver, ssrf
 from .antibot import Tier
 from .config import settings
 
 if TYPE_CHECKING:
+    from concurrent.futures import ProcessPoolExecutor
+
     from playwright.async_api import Browser, BrowserContext, Playwright
 
 RenderMode = Literal["auto", "static", "js"]
@@ -200,6 +202,7 @@ async def close_browser() -> None:
     global _pw, _browser
     await _context_pool.close()
     await httpclient.aclose_all()
+    _shutdown_extract_pool()
     if _browser is not None:
         try:
             await _browser.close()
@@ -400,8 +403,38 @@ def _extract_sync(html: str, url: str) -> Extraction:
     return out
 
 
+_extract_pool: ProcessPoolExecutor | None = None
+
+
+def _get_extract_pool():  # type: ignore[no-untyped-def]
+    """Lazily create a process pool for true multi-core extraction parallelism."""
+    global _extract_pool
+    if _extract_pool is None:
+        from concurrent.futures import ProcessPoolExecutor
+
+        _extract_pool = ProcessPoolExecutor(max_workers=settings.extract_workers)
+    return _extract_pool
+
+
+def _shutdown_extract_pool() -> None:
+    global _extract_pool
+    if _extract_pool is not None:
+        _extract_pool.shutdown(cancel_futures=True)
+        _extract_pool = None
+
+
 async def _extract(html: str, url: str) -> Extraction:
-    """Async wrapper that keeps heavy parsing off the event loop."""
+    """Async wrapper that keeps heavy parsing off the event loop.
+
+    Uses a process pool (true parallelism) when EXTRACT_WORKERS > 0, otherwise a
+    thread (GIL-bound, but fine for moderate load and zero spin-up cost).
+    """
+    if settings.extract_workers > 0:
+        try:
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(_get_extract_pool(), _extract_sync, html, url)
+        except Exception:  # noqa: BLE001 -- fall back to threads if the pool dies
+            pass
     return await asyncio.to_thread(_extract_sync, html, url)
 
 
@@ -793,7 +826,10 @@ def _tier_plan(url: str, render: RenderMode) -> list[int]:
         return [int(Tier.BROWSER)]
     # auto: start from what worked for this domain last time, escalate upward.
     start = antibot.profiles.suggested_tier(url) if settings.antibot_enabled else int(Tier.STATIC)
-    tiers = [t for t in (int(Tier.STATIC), int(Tier.IMPERSONATE), int(Tier.BROWSER)) if t >= start]
+    candidates = [int(Tier.STATIC), int(Tier.IMPERSONATE), int(Tier.BROWSER)]
+    if settings.flaresolverr_url:  # only attempt the solver tier when configured
+        candidates.append(int(Tier.SOLVER))
+    tiers = [t for t in candidates if t >= start]
     return tiers or [int(Tier.BROWSER)]
 
 
@@ -808,6 +844,17 @@ async def _run_engine(tier: int, url: str, cached: dict | None):
         sf = await _fetch_impersonate(url, cached=cached)
         return (sf.status, sf.final_url, sf.content_type, sf.text, sf.etag,
                 sf.last_modified, sf.not_modified, sf.headers or {})
+    if tier == int(Tier.SOLVER):
+        host = _host_of(url)
+        await ssrf.assert_url_allowed(url)
+        try:
+            res = await solver.solve(url, proxy=antibot.proxies.pick(host, int(Tier.SOLVER)))
+        except solver.SolverUnavailable as exc:
+            raise EngineUnavailable(str(exc)) from exc
+        await ssrf.assert_url_allowed(res.url)
+        if settings.persist_cookies and res.cookies:
+            _cookie_jars[host] = res.cookies  # reuse clearance cookies in later renders
+        return (res.status, res.url, None, res.html, None, None, False, {})
     # BROWSER
     status, final_url, html = await _fetch_js(url)
     return (status, final_url, None, html, None, None, False, {})
@@ -818,12 +865,26 @@ async def _crawl_escalating(
 ) -> CrawlResult:
     tiers = _tier_plan(url, render)
     last_error: str | None = None
+    host = _host_of(url)
+
+    # Stop hammering a host that keeps blocking us until its breaker cools down.
+    try:
+        concurrency.limiter.check_circuit(host)
+    except concurrency.CircuitOpen:
+        result["error"] = "circuit open: host temporarily skipped after repeated blocks"
+        result["metadata"]["circuit"] = "open"
+        return result
 
     for i, tier in enumerate(tiers):
         is_last = i == len(tiers) - 1
         try:
-            (status, final_url, content_type, html, etag,
-             last_modified, not_modified, headers) = await _run_engine(tier, url, cached)
+            async with concurrency.limiter.slot(host):
+                (status, final_url, content_type, html, etag,
+                 last_modified, not_modified, headers) = await _run_engine(tier, url, cached)
+        except concurrency.CircuitOpen:
+            result["error"] = "circuit open: host temporarily skipped after repeated blocks"
+            result["metadata"]["circuit"] = "open"
+            return result
         except EngineUnavailable:
             continue  # engine not installed/configured -> try the next tier
         except ssrf.BlockedAddressError as exc:
@@ -852,10 +913,11 @@ async def _crawl_escalating(
             if signal.blocked:
                 result["metadata"]["block"] = {"vendor": signal.vendor, "reason": signal.reason}
                 antibot.profiles.record_block(url, tier, signal.vendor)
+                concurrency.limiter.record_block(host)  # back off / trip breaker
                 last_error = f"blocked by {signal.vendor}"
                 if settings.escalate_on_block and not is_last:
                     if signal.vendor:  # rotate proxy on a hard block
-                        antibot.proxies.rotate(_host_of(url))
+                        antibot.proxies.rotate(host)
                     continue
                 result["error"] = last_error
                 return result
@@ -868,6 +930,7 @@ async def _crawl_escalating(
             result["render_mode"] = render_mode
             if settings.antibot_enabled:
                 antibot.profiles.record_success(url, tier)
+            concurrency.limiter.record_success(host)
             return result
 
         ext = await _extract(html, final_url)
@@ -880,6 +943,7 @@ async def _crawl_escalating(
 
         if settings.antibot_enabled:
             antibot.profiles.record_success(url, tier)
+        concurrency.limiter.record_success(host)
         return result
 
     if result["error"] is None and result["status"] is None:

@@ -172,16 +172,20 @@ async def list_pages(limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
     return [_row_to_dict(r) for r in rows]  # type: ignore[misc]
 
 
-async def iter_all_pages(batch: int = 500) -> AsyncIterator[dict[str, Any]]:
-    """Stream every page (lightweight columns) for export, in batches."""
-    offset = 0
-    while True:
-        rows = await list_pages(limit=batch, offset=offset)
-        if not rows:
-            return
-        for r in rows:
-            yield r
-        offset += batch
+async def iter_all_pages() -> AsyncIterator[dict[str, Any]]:
+    """Stream every page (lightweight columns) for export via a server-side cursor.
+
+    A cursor avoids the O(N^2) cost of deep LIMIT/OFFSET pagination and keeps
+    memory flat regardless of table size.
+    """
+    async with acquire() as conn, conn.transaction():
+        async for row in conn.cursor(
+            "SELECT id, url, final_url, status, title, render_mode, fetched_at "
+            "FROM pages ORDER BY fetched_at DESC"
+        ):
+            d = _row_to_dict(row)
+            if d is not None:
+                yield d
 
 
 async def search_pages(query: str, limit: int = 50) -> list[dict[str, Any]]:

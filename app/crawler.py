@@ -68,8 +68,10 @@ class _ContextPool:
     async def _make(self) -> BrowserContext:
         browser = await get_browser()
         context = await browser.new_context(user_agent=settings.user_agent)
-        if settings.block_resources_in_js:
-            await context.route("**/*", _block_heavy_resources)
+        # Validate every request the page makes (not just navigations) so a
+        # malicious page can't reach internal hosts via iframes/scripts/XHR,
+        # and drop heavy resources for speed.
+        await context.route("**/*", _route_request)
         self._all.append(context)
         return context
 
@@ -81,7 +83,13 @@ class _ContextPool:
         async with self._lock:
             if self._created < max(1, settings.js_context_pool_size):
                 self._created += 1
-                return await self._make()
+                try:
+                    return await self._make()
+                except Exception:
+                    # Don't leak capacity if context creation failed, or the pool
+                    # would permanently shrink and eventually deadlock.
+                    self._created -= 1
+                    raise
         # Pool is at capacity; wait for one to be released.
         return await self._pool.get()
 
@@ -102,8 +110,18 @@ class _ContextPool:
 _context_pool = _ContextPool()
 
 
-async def _block_heavy_resources(route) -> None:  # type: ignore[no-untyped-def]
-    if route.request.resource_type in ("image", "media", "font"):
+async def _route_request(route) -> None:  # type: ignore[no-untyped-def]
+    # Block any subrequest to a disallowed (private/internal) address.
+    try:
+        await ssrf.assert_url_allowed(route.request.url)
+    except ssrf.BlockedAddressError:
+        await route.abort()
+        return
+    if settings.block_resources_in_js and route.request.resource_type in (
+        "image",
+        "media",
+        "font",
+    ):
         await route.abort()
     else:
         await route.continue_()
@@ -438,7 +456,7 @@ async def _fetch_static(url: str, cached: dict | None = None) -> StaticFetch:
                     if resp.is_redirect:
                         location = resp.headers.get("location")
                         if not location:
-                            resp.raise_for_status()
+                            raise httpx.HTTPError("redirect response missing Location header")
                         current = urljoin(current, location)
                         continue
 
@@ -670,6 +688,7 @@ async def crawl_site(
     same_host_only: bool = True,
     concurrency: int | None = None,
     cache_lookup: CacheLookup | None = None,
+    on_page_crawled: Callable[[CrawlResult], None] | None = None,
 ) -> list[CrawlResult]:
     max_depth = min(max_depth, settings.max_depth_hard_limit)
     max_pages = min(max_pages, settings.max_pages_hard_limit)
@@ -723,9 +742,13 @@ async def crawl_site(
                 async with results_lock:
                     if len(results) < max_pages:
                         results.append(res)
+                        appended = True
                         expand = len(results) < max_pages
                     else:
+                        appended = False
                         expand = False
+                if appended and on_page_crawled is not None:
+                    on_page_crawled(res)  # live progress callback
                 if expand:
                     enqueue_links(res, depth)
             finally:

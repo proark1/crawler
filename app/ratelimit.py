@@ -44,6 +44,14 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         count += 1
         self._hits[key] = (window_start, count)
 
+        # Bound memory: drop entries whose window has fully expired once the map
+        # grows large, so a flood of unique IPs/keys can't leak indefinitely.
+        if len(self._hits) > 10_000:
+            self._hits = defaultdict(
+                lambda: (0.0, 0),
+                {k: v for k, v in self._hits.items() if now - v[0] < _WINDOW},
+            )
+
         if count > limit:
             retry_after = max(1, int(_WINDOW - (now - window_start)))
             return JSONResponse(

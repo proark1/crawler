@@ -159,7 +159,7 @@ def _make_cache_lookup(store: bool):
     return lookup
 
 
-async def _run_crawl(req: CrawlRequest) -> list[dict]:
+async def _run_crawl(req: CrawlRequest, on_progress=None) -> list[dict]:
     url = str(req.url)
     if req.follow_links:
         results = await crawl_site(
@@ -169,6 +169,7 @@ async def _run_crawl(req: CrawlRequest) -> list[dict]:
             max_pages=req.max_pages,
             same_host_only=req.same_host_only,
             cache_lookup=_make_cache_lookup(req.store),
+            on_page_crawled=on_progress,
         )
     else:
         cached = None
@@ -233,10 +234,18 @@ async def create_crawl_job(req: CrawlRequest) -> JobOut:
     )
     job.total = req.max_pages if req.follow_links else 1
 
+    def bump(_res) -> None:
+        # Cheap in-memory progress update so the SSE/poll views are live;
+        # the durable snapshot is written on status transitions.
+        import time as _t
+
+        job.progress += 1
+        job.updated_at = _t.time()
+
     async def runner() -> None:
         await jobs.mark(job, status="running")
         try:
-            stored = await _run_crawl(req)
+            stored = await _run_crawl(req, on_progress=bump)
             await jobs.mark(job, pages=stored, progress=len(stored), status="done")
         except asyncio.CancelledError:
             await jobs.mark(job, status="error", error="cancelled")

@@ -185,6 +185,22 @@ async def test_crawl_site_depth_limit(monkeypatch):
     assert results[0]["url"] == "https://ex.com/root"
 
 
+@pytest.mark.asyncio
+async def test_context_pool_restores_capacity_on_make_failure(monkeypatch):
+    pool = crawler._ContextPool()
+
+    async def boom():
+        raise RuntimeError("launch failed")
+
+    monkeypatch.setattr(pool, "_make", boom)
+    monkeypatch.setattr(settings, "js_context_pool_size", 1)
+
+    with pytest.raises(RuntimeError):
+        await pool.acquire()
+    # Capacity must be returned so the pool does not deadlock on the next acquire.
+    assert pool._created == 0
+
+
 def test_content_hash_stable_and_none():
     assert crawler._content_hash(None) is None
     assert crawler._content_hash("") is None

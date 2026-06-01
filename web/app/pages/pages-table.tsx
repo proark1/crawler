@@ -43,7 +43,9 @@ export default function PagesTable({ pages }: { pages: Row[] }) {
         ids.map((id) => fetch(`/api/pages/${id}`, { method: "DELETE" })),
       );
       const failed = results.filter(
-        (r) => r.status === "rejected" || (r.value && !r.value.ok && r.value.status !== 204),
+        (r) =>
+          r.status === "rejected" ||
+          (r.status === "fulfilled" && !r.value.ok && r.value.status !== 204),
       ).length;
       if (failed) notify(`${failed} page(s) could not be deleted`, "error");
       else notify(`Deleted ${ids.length} page${ids.length === 1 ? "" : "s"}`, "success");

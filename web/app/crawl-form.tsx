@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 type Page = {
   id: number | null;
@@ -15,7 +15,15 @@ type Page = {
   error: string | null;
 };
 
-type CrawlResponse = { count: number; pages: Page[] };
+type Job = {
+  id: string;
+  status: "pending" | "running" | "done" | "error";
+  progress: number;
+  total: number | null;
+  count: number;
+  pages: Page[];
+  error: string | null;
+};
 
 export default function CrawlForm() {
   const [url, setUrl] = useState("");
@@ -26,16 +34,28 @@ export default function CrawlForm() {
   const [sameHostOnly, setSameHostOnly] = useState(true);
 
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<CrawlResponse | null>(null);
+  const [job, setJob] = useState<Job | null>(null);
+  const [pages, setPages] = useState<Page[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const cancelled = useRef(false);
+
+  // Stop any in-flight polling loop if the user navigates away mid-crawl.
+  useEffect(() => {
+    return () => {
+      cancelled.current = true;
+    };
+  }, []);
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     setLoading(true);
     setError(null);
-    setResult(null);
+    setPages(null);
+    setJob(null);
+    cancelled.current = false;
+
     try {
-      const res = await fetch("/api/crawl", {
+      const startRes = await fetch("/api/crawl/jobs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -48,8 +68,24 @@ export default function CrawlForm() {
           store: true,
         }),
       });
-      if (!res.ok) throw new Error(await res.text());
-      setResult((await res.json()) as CrawlResponse);
+      if (!startRes.ok) throw new Error((await startRes.json()).error ?? "Failed to start crawl");
+      const started = (await startRes.json()) as Job;
+
+      // Poll until the job finishes.
+      let current = started;
+      while (current.status === "pending" || current.status === "running") {
+        if (cancelled.current) return;
+        await new Promise((r) => setTimeout(r, 600));
+        const pollRes = await fetch(`/api/crawl/jobs/${current.id}`);
+        if (!pollRes.ok) throw new Error("Lost track of the crawl job");
+        current = (await pollRes.json()) as Job;
+        setJob(current);
+      }
+
+      if (current.status === "error") {
+        throw new Error(current.error ?? "Crawl failed");
+      }
+      setPages(current.pages);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -59,6 +95,11 @@ export default function CrawlForm() {
 
   const inputBase =
     "w-full rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm text-neutral-900 placeholder:text-neutral-400 focus:border-neutral-300 focus:outline-none focus:ring-2 focus:ring-neutral-200";
+
+  const pct =
+    job && job.total && job.total > 0
+      ? Math.min(100, Math.round((job.progress / job.total) * 100))
+      : null;
 
   return (
     <div className="space-y-6">
@@ -160,19 +201,37 @@ export default function CrawlForm() {
         </div>
       </form>
 
+      {loading && job && (
+        <div className="rounded-lg border border-neutral-200 bg-white px-4 py-3">
+          <div className="mb-2 flex items-center justify-between text-xs text-neutral-600">
+            <span>
+              {job.status === "pending" ? "Queued…" : "Crawling…"} {job.progress}
+              {job.total ? ` / ${job.total}` : ""} page{job.progress === 1 ? "" : "s"}
+            </span>
+            {pct != null && <span>{pct}%</span>}
+          </div>
+          <div className="h-1.5 w-full overflow-hidden rounded-full bg-neutral-100">
+            <div
+              className="h-full rounded-full bg-[#0B1739] transition-all"
+              style={{ width: pct != null ? `${pct}%` : "40%" }}
+            />
+          </div>
+        </div>
+      )}
+
       {error && (
         <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
           {error}
         </div>
       )}
 
-      {result && (
+      {pages && (
         <div className="space-y-3">
           <div className="text-sm text-neutral-500">
-            {result.count} page{result.count === 1 ? "" : "s"} crawled
+            {pages.length} page{pages.length === 1 ? "" : "s"} crawled
           </div>
           <div className="overflow-hidden rounded-xl border border-neutral-200 bg-white">
-            <ResultTable pages={result.pages} />
+            <ResultTable pages={pages} />
           </div>
         </div>
       )}

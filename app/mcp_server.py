@@ -76,9 +76,19 @@ async def list_recent(limit: int = 20) -> str:
 
 @mcp.tool()
 async def search(query: str, limit: int = 20) -> str:
-    """Search previously crawled pages by URL, title, or text content."""
+    """Search previously crawled pages by URL, title, or text content (full-text ranked)."""
     rows = await db.search_pages(query, limit=limit)
     return json.dumps(rows, default=str)
+
+
+@mcp.tool()
+async def delete_page(url: str) -> str:
+    """Delete a previously crawled page by URL."""
+    row = await db.get_page_by_url(url)
+    if row is None:
+        return json.dumps({"deleted": False, "reason": "not found"})
+    deleted = await db.delete_page(int(row["id"]))
+    return json.dumps({"deleted": deleted})
 
 
 def main() -> None:

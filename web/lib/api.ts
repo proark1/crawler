@@ -29,36 +29,68 @@ export type CrawlResponse = {
   pages: Page[];
 };
 
+export type Job = {
+  id: string;
+  status: "pending" | "running" | "done" | "error";
+  progress: number;
+  total: number | null;
+  count: number;
+  pages: Page[];
+  error: string | null;
+};
+
 type Init = Omit<RequestInit, "headers"> & {
   headers?: Record<string, string>;
   cache?: RequestCache;
 };
 
-export async function apiFetch<T>(path: string, init: Init = {}): Promise<T> {
+function authHeaders(extra?: Record<string, string>): Record<string, string> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
-    ...(init.headers ?? {}),
+    ...(extra ?? {}),
   };
   if (KEY) headers["X-API-Key"] = KEY;
+  return headers;
+}
 
+async function rawFetch(path: string, init: Init = {}): Promise<Response> {
   const res = await fetch(`${BASE}${path}`, {
     ...init,
-    headers,
+    headers: authHeaders(init.headers),
     cache: init.cache ?? "no-store",
   });
   if (!res.ok) {
     const body = await res.text();
     throw new Error(`API ${res.status}: ${body || res.statusText}`);
   }
+  return res;
+}
+
+export async function apiFetch<T>(path: string, init: Init = {}): Promise<T> {
+  const res = await rawFetch(path, init);
   return res.json() as Promise<T>;
 }
 
 export const api = {
   crawl: (body: Record<string, unknown>) =>
     apiFetch<CrawlResponse>("/crawl", { method: "POST", body: JSON.stringify(body) }),
-  list: (limit = 50, offset = 0) =>
-    apiFetch<Page[]>(`/pages?limit=${limit}&offset=${offset}`),
+  createJob: (body: Record<string, unknown>) =>
+    apiFetch<Job>("/crawl/jobs", { method: "POST", body: JSON.stringify(body) }),
+  getJob: (id: string) => apiFetch<Job>(`/crawl/jobs/${encodeURIComponent(id)}`),
+  list: async (limit = 50, offset = 0): Promise<{ pages: Page[]; total: number }> => {
+    const res = await rawFetch(`/pages?limit=${limit}&offset=${offset}`);
+    const total = Number(res.headers.get("X-Total-Count") ?? "0");
+    const pages = (await res.json()) as Page[];
+    return { pages, total };
+  },
   search: (q: string, limit = 50) =>
     apiFetch<Page[]>(`/pages/search?q=${encodeURIComponent(q)}&limit=${limit}`),
   get: (id: number) => apiFetch<Page>(`/pages/${id}`),
+  remove: (id: number) =>
+    rawFetch(`/pages/${id}`, { method: "DELETE" }).then(() => undefined),
+  stats: async (): Promise<{ total: number }> => {
+    const res = await rawFetch(`/pages?limit=1&offset=0`);
+    await res.text();
+    return { total: Number(res.headers.get("X-Total-Count") ?? "0") };
+  },
 };

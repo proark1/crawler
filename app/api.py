@@ -8,15 +8,17 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Literal
 
+import asyncpg
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse, StreamingResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field, HttpUrl
 
 from . import db, jobs, observability, service
 from .auth import require_api_key
 from .config import settings
 from .crawler import close_browser
+from .lrucache import BoundedLRU
 from .ratelimit import RateLimitMiddleware
 
 log = logging.getLogger("crawler.api")
@@ -110,19 +112,59 @@ app.add_middleware(
 )
 
 
+@app.exception_handler(asyncpg.PostgresError)
+async def _pg_error_handler(request: Request, exc: asyncpg.PostgresError) -> JSONResponse:
+    log.error("database error on %s: %s", request.url.path, exc)
+    return JSONResponse(status_code=503, content={"detail": "Database unavailable"})
+
+
+@app.exception_handler(asyncio.TimeoutError)
+async def _timeout_handler(request: Request, exc: asyncio.TimeoutError) -> JSONResponse:
+    # Most commonly a pool-acquire timeout under saturation.
+    log.error("timeout on %s", request.url.path)
+    return JSONResponse(status_code=503, content={"detail": "Service busy, try again"})
+
+
 @app.middleware("http")
 async def _metrics_middleware(request: Request, call_next):
     response = await call_next(request)
-    observability.record_http(
-        request.method, request.url.path, response.status_code
-    )
+    # Use the matched route template (e.g. "/pages/{page_id}") rather than the
+    # concrete path so per-id requests don't explode Prometheus label cardinality.
+    route = request.scope.get("route")
+    path = getattr(route, "path", None) or "other"
+    observability.record_http(request.method, path, response.status_code)
     return response
+
+
+# Defined last so it wraps routing: strip an optional "/v1" prefix so every
+# endpoint is reachable at both "/x" and "/v1/x" without duplicating routes.
+_VERSION_PREFIX = f"/{settings.api_version}"
+
+
+@app.middleware("http")
+async def _version_prefix_middleware(request: Request, call_next):
+    path = request.scope.get("path", "")
+    if path == _VERSION_PREFIX or path.startswith(_VERSION_PREFIX + "/"):
+        stripped = path[len(_VERSION_PREFIX):] or "/"
+        request.scope["path"] = stripped
+        request.scope["raw_path"] = stripped.encode()
+    return await call_next(request)
 
 
 @app.get("/health")
 async def health() -> dict:
+    """Liveness: 200 while the process is up; reports DB connectivity informationally."""
     db_ok = await db.ping()
     return {"status": "ok" if db_ok else "degraded", "database": db_ok}
+
+
+@app.get("/ready")
+async def ready(response: Response) -> dict:
+    """Readiness: 503 when the database is unreachable, so orchestrators hold traffic."""
+    db_ok = await db.ping()
+    if not db_ok:
+        response.status_code = 503
+    return {"status": "ready" if db_ok else "unready", "database": db_ok}
 
 
 class StatsResponse(BaseModel):
@@ -193,14 +235,12 @@ async def crawl(req: CrawlRequest) -> CrawlResponse:
     return CrawlResponse(pages=[_to_page_out(p) for p in stored], count=len(stored))
 
 
-@app.post(
-    "/crawl/jobs",
-    response_model=JobOut,
-    status_code=202,
-    dependencies=[Depends(require_api_key)],
-)
-async def create_crawl_job(req: CrawlRequest) -> JobOut:
-    """Submit a crawl that runs in the background; poll /crawl/jobs/{id} for results."""
+# Idempotency-Key -> job id, so a retried submission returns the same job
+# instead of starting a duplicate crawl.
+_idempotency: BoundedLRU[str, str] = BoundedLRU(2048)
+
+
+async def _start_job(req: CrawlRequest) -> jobs.Job:
     job = await jobs.create_job(
         request=json.loads(req.model_dump_json()),
         webhook_url=str(req.webhook_url) if req.webhook_url else None,
@@ -208,8 +248,6 @@ async def create_crawl_job(req: CrawlRequest) -> JobOut:
     job.total = req.max_pages if req.follow_links else 1
 
     def bump(_res) -> None:
-        # Cheap in-memory progress update so the SSE/poll views are live;
-        # the durable snapshot is written on status transitions.
         import time as _t
 
         job.progress += 1
@@ -221,7 +259,7 @@ async def create_crawl_job(req: CrawlRequest) -> JobOut:
             stored = await _run_crawl(req, on_progress=bump)
             await jobs.mark(job, pages=stored, progress=len(stored), status="done")
         except asyncio.CancelledError:
-            await jobs.mark(job, status="error", error="cancelled")
+            await jobs.mark(job, status="cancelled", error="cancelled")
             raise
         except Exception as exc:  # noqa: BLE001
             await jobs.mark(job, status="error", error=f"{type(exc).__name__}: {exc}")
@@ -229,7 +267,65 @@ async def create_crawl_job(req: CrawlRequest) -> JobOut:
             await jobs.fire_webhook(job)
 
     job._task = asyncio.create_task(runner())
+    return job
+
+
+class BatchCrawlRequest(BaseModel):
+    urls: list[HttpUrl] = Field(..., min_length=1, max_length=50)
+    render: Literal["auto", "static", "js"] = "auto"
+    follow_links: bool = False
+    max_depth: int = Field(1, ge=0, le=5)
+    max_pages: int = Field(10, ge=1, le=100)
+    same_host_only: bool = True
+    store: bool = True
+    use_sitemap: bool = True
+    webhook_url: HttpUrl | None = None
+
+
+class BatchJobOut(BaseModel):
+    jobs: list[dict]
+
+
+@app.post(
+    "/crawl/jobs",
+    response_model=JobOut,
+    status_code=202,
+    dependencies=[Depends(require_api_key)],
+)
+async def create_crawl_job(req: CrawlRequest, request: Request) -> JobOut:
+    """Submit a crawl that runs in the background; poll /crawl/jobs/{id} for results.
+
+    Pass an ``Idempotency-Key`` header to make retries safe: the same key returns
+    the original job instead of starting a duplicate crawl.
+    """
+    idem = request.headers.get("idempotency-key")
+    if idem:
+        existing_id = _idempotency.get(idem)
+        if existing_id and (existing := jobs.get_job(existing_id)) is not None:
+            return JobOut(id=existing.id, status=existing.status, progress=existing.progress,
+                          total=existing.total, count=len(existing.pages))
+
+    job = await _start_job(req)
+    if idem:
+        _idempotency.set(idem, job.id)
     return JobOut(id=job.id, status=job.status, progress=0, total=job.total, count=0)
+
+
+@app.post(
+    "/crawl/batch",
+    response_model=BatchJobOut,
+    status_code=202,
+    dependencies=[Depends(require_api_key)],
+)
+async def create_batch_crawl(req: BatchCrawlRequest) -> BatchJobOut:
+    """Submit many URLs at once; each becomes its own background job."""
+    shared = req.model_dump(exclude={"urls"})
+    out = []
+    for url in req.urls:
+        single = CrawlRequest(url=url, **shared)
+        job = await _start_job(single)
+        out.append({"url": str(url), "job_id": job.id})
+    return BatchJobOut(jobs=out)
 
 
 @app.get(
@@ -262,19 +358,39 @@ async def list_crawl_jobs(
     dependencies=[Depends(require_api_key)],
 )
 async def get_crawl_job(job_id: str) -> JobOut:
-    """Fetch a job's status and (when finished) its crawled pages."""
+    """Fetch a job's status and (when finished) its crawled pages.
+
+    The embedded ``pages`` list is capped at ``job_pages_inline_limit``; ``count``
+    always reflects the true total. Use /pages or /pages/export for the full set.
+    """
     data = await jobs.load_public(job_id)
     if data is None:
         raise HTTPException(status_code=404, detail="Job not found")
+    inline_pages = data["pages"][: settings.job_pages_inline_limit]
     return JobOut(
         id=data["id"],
         status=data["status"],
         progress=data["progress"],
         total=data["total"],
         count=data["count"],
-        pages=[_to_page_out(p) for p in data["pages"]],
+        pages=[_to_page_out(p) for p in inline_pages],
         error=data["error"],
     )
+
+
+@app.delete(
+    "/crawl/jobs/{job_id}",
+    status_code=202,
+    dependencies=[Depends(require_api_key)],
+)
+async def cancel_crawl_job(job_id: str) -> dict:
+    """Cancel a running background job. 404 if unknown; 409 if already finished."""
+    if jobs.get_job(job_id) is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    cancelled = await jobs.cancel(job_id)
+    if not cancelled:
+        raise HTTPException(status_code=409, detail="Job already finished")
+    return {"id": job_id, "status": "cancelled"}
 
 
 @app.get(

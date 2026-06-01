@@ -24,7 +24,12 @@ _PAGE_COLS = (
 async def init_pool() -> asyncpg.Pool:
     global _pool
     if _pool is None:
-        _pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=10)
+        _pool = await asyncpg.create_pool(
+            settings.database_url,
+            min_size=settings.db_pool_min_size,
+            max_size=settings.db_pool_max_size,
+            command_timeout=settings.db_command_timeout,
+        )
         async with _pool.acquire() as conn:
             await apply_migrations(conn)
     return _pool
@@ -50,8 +55,13 @@ async def ping() -> bool:
 @asynccontextmanager
 async def acquire() -> AsyncIterator[asyncpg.Connection]:
     pool = await init_pool()
-    async with pool.acquire() as conn:
+    # Bound the wait for a free connection so a saturated pool fails fast (503)
+    # instead of hanging the request indefinitely.
+    conn = await pool.acquire(timeout=settings.db_acquire_timeout)
+    try:
         yield conn
+    finally:
+        await pool.release(conn)
 
 
 def _gz(html: str | None) -> bytes | None:

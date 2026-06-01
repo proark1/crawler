@@ -39,6 +39,16 @@ export type Job = {
   error: string | null;
 };
 
+export type DomainProfile = {
+  host: string;
+  min_tier: number;
+  engine: string;
+  successes: number;
+  blocks: number;
+  last_vendor: string | null;
+  last_block_at: number | null;
+};
+
 export type JobSummary = {
   id: string;
   status: "pending" | "running" | "done" | "error";
@@ -89,6 +99,7 @@ export const api = {
   getJob: (id: string) => apiFetch<Job>(`/crawl/jobs/${encodeURIComponent(id)}`),
   listJobs: (limit = 50, offset = 0) =>
     apiFetch<JobSummary[]>(`/crawl/jobs?limit=${limit}&offset=${offset}`),
+  domains: (limit = 200) => apiFetch<DomainProfile[]>(`/domains?limit=${limit}`),
   streamJob: (id: string) => rawFetch(`/crawl/jobs/${encodeURIComponent(id)}/stream`),
   list: async (limit = 50, offset = 0): Promise<{ pages: Page[]; total: number }> => {
     const res = await rawFetch(`/pages?limit=${limit}&offset=${offset}`);

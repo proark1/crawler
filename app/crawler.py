@@ -325,8 +325,12 @@ def _extract_structured_metadata(tree: HTMLParser, url: str) -> dict:
     if published:
         meta["published_at"] = published
 
-    # JSON-LD: capture a couple of widely useful fields without dragging in the
-    # entire (often huge) graph.
+    # JSON-LD: capture widely useful Article/Product fields without dragging in
+    # the entire (often huge) graph.
+    def _types(item: dict) -> list[str]:
+        t = item.get("@type")
+        return [t] if isinstance(t, str) else (t if isinstance(t, list) else [])
+
     for node in tree.css('script[type="application/ld+json"]'):
         raw = node.text()
         if not raw:
@@ -336,9 +340,20 @@ def _extract_structured_metadata(tree: HTMLParser, url: str) -> dict:
         except (json.JSONDecodeError, ValueError):
             continue
         items = data if isinstance(data, list) else [data]
-        for item in items:
+        # Flatten schema.org @graph wrappers.
+        flat: list = []
+        for it in items:
+            if isinstance(it, dict) and isinstance(it.get("@graph"), list):
+                flat.extend(it["@graph"])
+            else:
+                flat.append(it)
+
+        for item in flat:
             if not isinstance(item, dict):
                 continue
+            types = _types(item)
+            if types and "schema_type" not in meta:
+                meta["schema_type"] = types[0]
             if "author" not in meta:
                 a = item.get("author")
                 if isinstance(a, dict) and a.get("name"):
@@ -347,9 +362,32 @@ def _extract_structured_metadata(tree: HTMLParser, url: str) -> dict:
                     meta["author"] = a
             if "published_at" not in meta and item.get("datePublished"):
                 meta["published_at"] = item["datePublished"]
-            if item.get("@type") and "schema_type" not in meta:
-                meta["schema_type"] = item["@type"]
-        break  # one ld+json block is plenty
+            if "description" not in meta and isinstance(item.get("description"), str):
+                meta["description"] = item["description"].strip()[:500]
+
+            # Product / Offer enrichment.
+            if any(t in ("Product", "Offer", "AggregateOffer") for t in types) or "offers" in item:
+                product: dict = meta.get("product", {})
+                if isinstance(item.get("name"), str):
+                    product.setdefault("name", item["name"])
+                brand = item.get("brand")
+                if isinstance(brand, dict) and brand.get("name"):
+                    product.setdefault("brand", brand["name"])
+                elif isinstance(brand, str):
+                    product.setdefault("brand", brand)
+                offers = item.get("offers")
+                offer = offers[0] if isinstance(offers, list) and offers else offers
+                if isinstance(offer, dict):
+                    if offer.get("price") is not None:
+                        product.setdefault("price", str(offer["price"]))
+                    if offer.get("priceCurrency"):
+                        product.setdefault("currency", offer["priceCurrency"])
+                    if isinstance(offer.get("availability"), str):
+                        product.setdefault("availability", offer["availability"].rsplit("/", 1)[-1])
+                if product:
+                    meta["product"] = product
+        if len(flat) and meta.get("schema_type"):
+            break  # one informative ld+json block is plenty
 
     return meta
 
@@ -1019,6 +1057,11 @@ async def crawl_site(
     results_lock = asyncio.Lock()
 
     def enqueue_links(res: CrawlResult, depth: int) -> None:
+        # Treat a page's canonical URL as already seen, so we don't separately
+        # crawl duplicate URLs that all point at the same canonical.
+        canon = (res.get("metadata") or {}).get("canonical")
+        if canon:
+            seen.add(canon)
         if depth >= max_depth:
             return
         for link in res.get("links", []):

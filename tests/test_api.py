@@ -197,6 +197,20 @@ async def test_list_jobs(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_list_domains(monkeypatch):
+    from app import antibot
+    from app.antibot import Tier
+
+    antibot.profiles.record_block("https://blocked.example", int(Tier.STATIC), "datadome")
+    async with _client() as c:
+        r = await c.get("/domains")
+    assert r.status_code == 200
+    hosts = {d["host"]: d for d in r.json()}
+    assert hosts["blocked.example"]["last_vendor"] == "datadome"
+    assert hosts["blocked.example"]["engine"] == "impersonate"
+
+
+@pytest.mark.asyncio
 async def test_raw_html_endpoint(monkeypatch):
     async def fake_html(page_id):
         return "<html><body>hi</body></html>" if page_id == 1 else None

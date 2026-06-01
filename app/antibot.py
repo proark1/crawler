@@ -199,6 +199,22 @@ class DomainProfileStore:
         while len(self._data) > self._max:
             self._data.popitem(last=False)
 
+    def snapshot(self, limit: int = 200) -> list[dict]:
+        """Most-recently-updated domain profiles, for observability."""
+        items = sorted(self._data.values(), key=lambda p: p.updated_at, reverse=True)
+        out = []
+        for p in items[:limit]:
+            out.append({
+                "host": p.host,
+                "min_tier": p.min_tier,
+                "engine": Tier(p.min_tier).name.lower(),
+                "successes": p.successes,
+                "blocks": p.blocks,
+                "last_vendor": p.last_vendor,
+                "last_block_at": p.last_block_at or None,
+            })
+        return out
+
 
 profiles = DomainProfileStore()
 

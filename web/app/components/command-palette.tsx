@@ -30,6 +30,7 @@ export function CommandPaletteProvider({ children }: { children: React.ReactNode
       { label: "New crawl", hint: "Go", run: () => router.push("/") },
       { label: "Pages", hint: "Go", run: () => router.push("/pages") },
       { label: "Jobs", hint: "Go", run: () => router.push("/jobs") },
+      { label: "Domains", hint: "Go", run: () => router.push("/domains") },
       { label: "Settings", hint: "Go", run: () => router.push("/settings") },
     ];
     if (query.trim()) {

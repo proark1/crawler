@@ -124,10 +124,16 @@ async def health() -> dict:
     return {"status": "ok" if db_ok else "degraded", "database": db_ok}
 
 
-@app.get("/stats", dependencies=[Depends(require_api_key)])
-async def stats() -> dict:
+class StatsResponse(BaseModel):
+    total: int
+    errors: int
+    blocked: int
+
+
+@app.get("/stats", response_model=StatsResponse, dependencies=[Depends(require_api_key)])
+async def stats() -> StatsResponse:
     """Index aggregates: total stored pages, errored pages, and bot-blocked pages."""
-    return await db.stats()
+    return StatsResponse(**await db.stats())
 
 
 @app.get("/metrics")

@@ -132,7 +132,7 @@ function IndexStatus() {
         )}
       </div>
       {ok && stats && (stats.blocked > 0 || stats.errors > 0) && (
-        <div className="mt-1 flex gap-3 text-[11px] text-neutral-500 dark:text-neutral-500">
+        <div className="mt-1 flex gap-3 text-[11px] text-neutral-500 dark:text-neutral-400">
           {stats.errors > 0 && <span>{stats.errors.toLocaleString()} errored</span>}
           {stats.blocked > 0 && <span>{stats.blocked.toLocaleString()} blocked</span>}
         </div>

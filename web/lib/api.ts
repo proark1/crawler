@@ -29,9 +29,11 @@ export type CrawlResponse = {
   pages: Page[];
 };
 
+export type JobStatus = "pending" | "running" | "done" | "error" | "cancelled";
+
 export type Job = {
   id: string;
-  status: "pending" | "running" | "done" | "error";
+  status: JobStatus;
   progress: number;
   total: number | null;
   count: number;
@@ -51,7 +53,7 @@ export type DomainProfile = {
 
 export type JobSummary = {
   id: string;
-  status: "pending" | "running" | "done" | "error";
+  status: JobStatus;
   progress: number;
   total: number | null;
   error: string | null;
@@ -73,6 +75,66 @@ function authHeaders(extra?: Record<string, string>): Record<string, string> {
   return headers;
 }
 
+/** Error thrown by the API client. Carries the upstream HTTP status when known. */
+export class ApiError extends Error {
+  status: number;
+  body: string;
+  constructor(status: number, body: string) {
+    super(`API ${status}: ${body}`);
+    this.name = "ApiError";
+    this.status = status;
+    this.body = body;
+  }
+}
+
+/**
+ * Turn a thrown error into a concise, user-facing message + HTTP status to
+ * return from a route handler. Distinguishes unreachable service, auth, and
+ * validation/4xx errors. Never leaks stack traces.
+ */
+export function describeApiError(
+  err: unknown,
+  fallback = "Something went wrong talking to the crawler service.",
+): { message: string; status: number } {
+  if (err instanceof ApiError) {
+    const { status, body } = err;
+    const detail = extractDetail(body);
+    if (status === 401 || status === 403) {
+      return {
+        message: "Not authorized to reach the crawler service. Check the API key.",
+        status,
+      };
+    }
+    if (status === 404) {
+      return { message: detail || "Not found.", status };
+    }
+    if (status === 409) {
+      return { message: detail || "Conflict — the resource is in a state that can't accept this.", status };
+    }
+    if (status >= 400 && status < 500) {
+      return { message: detail || "The request was rejected. Check the inputs and try again.", status };
+    }
+    return { message: detail || fallback, status: status >= 500 ? 502 : status };
+  }
+  // Network-level failure: fetch rejected before we got a response.
+  return { message: "Couldn't reach the crawler service. Is it running?", status: 502 };
+}
+
+/** Pull a human-readable message out of a FastAPI error body, if present. */
+function extractDetail(body: string): string {
+  if (!body) return "";
+  try {
+    const parsed = JSON.parse(body);
+    const detail = parsed?.detail ?? parsed?.error ?? parsed?.message;
+    if (typeof detail === "string") return detail;
+    if (Array.isArray(detail) && detail[0]?.msg) return String(detail[0].msg);
+  } catch {
+    // Not JSON — fall back to the raw text if it's short enough to be useful.
+    if (body.length <= 200) return body;
+  }
+  return "";
+}
+
 async function rawFetch(path: string, init: Init = {}): Promise<Response> {
   const res = await fetch(`${BASE}${path}`, {
     ...init,
@@ -81,7 +143,7 @@ async function rawFetch(path: string, init: Init = {}): Promise<Response> {
   });
   if (!res.ok) {
     const body = await res.text();
-    throw new Error(`API ${res.status}: ${body || res.statusText}`);
+    throw new ApiError(res.status, body || res.statusText);
   }
   return res;
 }
@@ -97,6 +159,8 @@ export const api = {
   createJob: (body: Record<string, unknown>) =>
     apiFetch<Job>("/crawl/jobs", { method: "POST", body: JSON.stringify(body) }),
   getJob: (id: string) => apiFetch<Job>(`/crawl/jobs/${encodeURIComponent(id)}`),
+  cancelJob: (id: string) =>
+    rawFetch(`/crawl/jobs/${encodeURIComponent(id)}`, { method: "DELETE" }).then(() => undefined),
   listJobs: (limit = 50, offset = 0) =>
     apiFetch<JobSummary[]>(`/crawl/jobs?limit=${limit}&offset=${offset}`),
   domains: (limit = 200) => apiFetch<DomainProfile[]>(`/domains?limit=${limit}`),

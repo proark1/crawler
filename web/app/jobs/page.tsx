@@ -1,4 +1,6 @@
+import Link from "next/link";
 import { api, type JobSummary } from "@/lib/api";
+import Time from "../components/time";
 
 export const dynamic = "force-dynamic";
 
@@ -7,6 +9,7 @@ const STATUS_STYLES: Record<string, string> = {
   error: "bg-red-50 text-red-700 dark:bg-red-950 dark:text-red-300",
   running: "bg-amber-50 text-amber-700 dark:bg-amber-950 dark:text-amber-300",
   pending: "bg-neutral-100 text-neutral-600 dark:bg-neutral-800 dark:text-neutral-300",
+  cancelled: "bg-neutral-100 text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400",
 };
 
 export default async function JobsPage() {
@@ -56,17 +59,30 @@ export default async function JobsPage() {
                   {j.total ? ` / ${j.total}` : ""}
                 </td>
                 <td className="hidden px-5 py-3 text-xs text-neutral-500 md:table-cell dark:text-neutral-400">
-                  {j.updated_at ? new Date(j.updated_at).toLocaleString() : "—"}
+                  <Time iso={j.updated_at} />
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
         {jobs.length === 0 && (
-          <div className="px-5 py-12 text-center text-sm text-neutral-500 dark:text-neutral-400">
-            {unavailable
-              ? "Jobs are unavailable (backend unreachable)."
-              : "No background jobs yet."}
+          <div className="flex flex-col items-center gap-4 px-5 py-12 text-center text-sm text-neutral-500 dark:text-neutral-400">
+            <span>
+              {unavailable
+                ? "Jobs are unavailable (backend unreachable)."
+                : "No background jobs yet."}
+            </span>
+            {!unavailable && (
+              <Link
+                href="/"
+                className="inline-flex items-center gap-1.5 rounded-lg bg-[#0B1739] px-4 py-2 text-sm font-medium text-white shadow-sm hover:opacity-90 dark:bg-indigo-600"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4">
+                  <path d="M12 5v14M5 12h14" />
+                </svg>
+                New crawl
+              </Link>
+            )}
           </div>
         )}
       </div>

@@ -103,16 +103,25 @@ function IndexStatus() {
 
   useEffect(() => {
     let alive = true;
-    fetch("/api/stats")
-      .then((r) => r.json())
-      .then((d) => {
-        if (!alive) return;
-        if (d.total == null) setOk(false);
-        else setStats(d);
-      })
-      .catch(() => alive && setOk(false));
+    const load = () =>
+      fetch("/api/stats")
+        .then((r) => r.json())
+        .then((d) => {
+          if (!alive) return;
+          if (d.total == null) {
+            setOk(false);
+          } else {
+            setStats(d);
+            setOk(true);
+          }
+        })
+        .catch(() => alive && setOk(false));
+
+    load();
+    const id = setInterval(load, 30_000);
     return () => {
       alive = false;
+      clearInterval(id);
     };
   }, []);
 

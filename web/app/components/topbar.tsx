@@ -27,6 +27,8 @@ export default function Topbar() {
           <button
             type="button"
             onClick={open}
+            aria-label="Search or jump to"
+            aria-keyshortcuts="Meta+K Control+K"
             className="relative flex w-full max-w-xl items-center rounded-lg border border-neutral-200 bg-white px-3 py-1.5 text-left text-sm text-neutral-400 hover:bg-neutral-50 dark:border-neutral-700 dark:bg-neutral-900 dark:hover:bg-neutral-800"
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" className="mr-2 h-4 w-4">

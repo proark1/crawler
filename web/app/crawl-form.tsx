@@ -18,7 +18,7 @@ type Page = {
 
 type Job = {
   id: string;
-  status: "pending" | "running" | "done" | "error";
+  status: "pending" | "running" | "done" | "error" | "cancelled";
   progress: number;
   total: number | null;
   count: number;
@@ -40,6 +40,8 @@ export default function CrawlForm() {
   const [job, setJob] = useState<Job | null>(null);
   const [pages, setPages] = useState<Page[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [cancelling, setCancelling] = useState(false);
+  const [wasCancelled, setWasCancelled] = useState(false);
 
   const cancelled = useRef(false);
   const esRef = useRef<EventSource | null>(null);
@@ -58,11 +60,38 @@ export default function CrawlForm() {
       if (cancelled.current) throw new Error("cancelled");
       await new Promise((r) => setTimeout(r, 700));
       const res = await fetch(`/api/crawl/jobs/${id}`);
-      if (!res.ok) throw new Error("Lost track of the crawl job");
+      if (!res.ok) {
+        const msg = await res.json().then((d) => d.error).catch(() => null);
+        throw new Error(msg ?? "Lost track of the crawl job");
+      }
       current = (await res.json()) as Job;
       setJob(current);
     }
     return current;
+  }
+
+  async function onCancel() {
+    if (!job) return;
+    setCancelling(true);
+    try {
+      const res = await fetch(`/api/crawl/jobs/${job.id}`, { method: "DELETE" });
+      if (!res.ok && res.status !== 202) {
+        const msg = await res.json().then((d) => d.error).catch(() => null);
+        throw new Error(msg ?? "Could not cancel the crawl.");
+      }
+      // Stop local polling/stream and reflect a cancelled state.
+      cancelled.current = true;
+      esRef.current?.close();
+      setWasCancelled(true);
+      setLoading(false);
+      setJob((j) => (j ? { ...j, status: "cancelled" } : j));
+      notify("Crawl cancelled", "success");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      notify(msg, "error");
+    } finally {
+      setCancelling(false);
+    }
   }
 
   function streamUntilDone(id: string): Promise<Job> {
@@ -86,7 +115,8 @@ export default function CrawlForm() {
         try {
           const data = JSON.parse(e.data) as Job;
           setJob(data);
-          if (data.status === "done" || data.status === "error") finish(data);
+          if (data.status === "done" || data.status === "error" || data.status === "cancelled")
+            finish(data);
         } catch {
           /* ignore keep-alives / parse errors */
         }
@@ -107,6 +137,7 @@ export default function CrawlForm() {
     setError(null);
     setPages(null);
     setJob(null);
+    setWasCancelled(false);
     cancelled.current = false;
 
     try {
@@ -124,11 +155,15 @@ export default function CrawlForm() {
           store: true,
         }),
       });
-      if (!startRes.ok) throw new Error((await startRes.json()).error ?? "Failed to start crawl");
+      if (!startRes.ok) {
+        const msg = await startRes.json().then((d) => d.error).catch(() => null);
+        throw new Error(msg ?? "Failed to start the crawl.");
+      }
       const started = (await startRes.json()) as Job;
       setJob(started);
 
       const final = await streamUntilDone(started.id);
+      if (final.status === "cancelled") return;
       if (final.status === "error") throw new Error(final.error ?? "Crawl failed");
       setPages(final.pages);
       notify(`Crawled ${final.pages.length} page${final.pages.length === 1 ? "" : "s"}`, "success");
@@ -191,6 +226,7 @@ export default function CrawlForm() {
               value={maxDepth}
               onChange={(e) => setMaxDepth(Number(e.target.value))}
               disabled={!followLinks}
+              aria-describedby={!followLinks ? "follow-links-hint" : undefined}
               className={`${inputBase} disabled:bg-neutral-50 disabled:text-neutral-400 dark:disabled:bg-neutral-800`}
             />
           </label>
@@ -204,10 +240,17 @@ export default function CrawlForm() {
               value={maxPages}
               onChange={(e) => setMaxPages(Number(e.target.value))}
               disabled={!followLinks}
+              aria-describedby={!followLinks ? "follow-links-hint" : undefined}
               className={`${inputBase} disabled:bg-neutral-50 disabled:text-neutral-400 dark:disabled:bg-neutral-800`}
             />
           </label>
         </div>
+
+        {!followLinks && (
+          <p id="follow-links-hint" className="-mt-2 text-xs text-neutral-400 dark:text-neutral-500">
+            Enable “Follow links” to set max depth and max pages.
+          </p>
+        )}
 
         <div className="flex flex-wrap items-center gap-5 border-t border-neutral-100 pt-4 text-sm dark:border-neutral-800">
           <label className="inline-flex cursor-pointer items-center gap-2 text-neutral-700 dark:text-neutral-300">
@@ -247,7 +290,7 @@ export default function CrawlForm() {
           >
             {loading ? (
               <>
-                <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none">
+                <svg className="h-4 w-4 animate-spin motion-reduce:animate-none" viewBox="0 0 24 24" fill="none">
                   <circle cx="12" cy="12" r="9" stroke="currentColor" strokeOpacity="0.25" strokeWidth="3" />
                   <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
                 </svg>
@@ -262,19 +305,52 @@ export default function CrawlForm() {
 
       {loading && job && (
         <div className="rounded-lg border border-neutral-200 bg-white px-4 py-3 dark:border-neutral-800 dark:bg-neutral-900">
-          <div className="mb-2 flex items-center justify-between text-xs text-neutral-600 dark:text-neutral-400">
+          <div className="mb-2 flex items-center justify-between gap-3 text-xs text-neutral-600 dark:text-neutral-400">
             <span>
               {job.status === "pending" ? "Queued…" : "Crawling…"} {job.progress}
               {job.total ? ` / ${job.total}` : ""} page{job.progress === 1 ? "" : "s"}
             </span>
-            {pct != null && <span>{pct}%</span>}
+            <span className="flex items-center gap-3">
+              {pct != null && <span>{pct}%</span>}
+              <button
+                type="button"
+                onClick={onCancel}
+                disabled={cancelling}
+                className="rounded-md border border-neutral-200 px-2 py-0.5 font-medium text-neutral-600 hover:bg-neutral-50 disabled:opacity-50 dark:border-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-800"
+              >
+                {cancelling ? "Cancelling…" : "Cancel"}
+              </button>
+            </span>
           </div>
-          <div className="h-1.5 w-full overflow-hidden rounded-full bg-neutral-100 dark:bg-neutral-800">
-            <div
-              className="h-full rounded-full bg-[#0B1739] transition-all dark:bg-indigo-500"
-              style={{ width: pct != null ? `${pct}%` : "40%" }}
-            />
+          <div
+            className="h-1.5 w-full overflow-hidden rounded-full bg-neutral-100 dark:bg-neutral-800"
+            role="progressbar"
+            aria-valuenow={pct ?? undefined}
+            aria-valuemin={0}
+            aria-valuemax={100}
+          >
+            {pct != null ? (
+              <div
+                className="h-full rounded-full bg-[#0B1739] transition-all dark:bg-indigo-500"
+                style={{ width: `${pct}%` }}
+              />
+            ) : (
+              // Total unknown: indeterminate bar. Animates a sliding segment,
+              // but falls back to a static partial bar under reduced-motion.
+              <div className="relative h-full w-full motion-reduce:hidden">
+                <div className="absolute inset-y-0 left-0 w-2/5 animate-[indeterminate_1.4s_ease-in-out_infinite] rounded-full bg-[#0B1739] dark:bg-indigo-500" />
+              </div>
+            )}
+            {pct == null && (
+              <div className="hidden h-full w-1/3 rounded-full bg-[#0B1739] motion-reduce:block dark:bg-indigo-500" />
+            )}
           </div>
+        </div>
+      )}
+
+      {wasCancelled && (
+        <div className="rounded-lg border border-neutral-200 bg-neutral-50 px-4 py-3 text-sm text-neutral-600 dark:border-neutral-800 dark:bg-neutral-800/50 dark:text-neutral-300">
+          Crawl cancelled.
         </div>
       )}
 

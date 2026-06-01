@@ -34,6 +34,7 @@ export default function CrawlForm() {
   const [maxDepth, setMaxDepth] = useState(1);
   const [maxPages, setMaxPages] = useState(10);
   const [sameHostOnly, setSameHostOnly] = useState(true);
+  const [useSitemap, setUseSitemap] = useState(true);
 
   const [loading, setLoading] = useState(false);
   const [job, setJob] = useState<Job | null>(null);
@@ -119,6 +120,7 @@ export default function CrawlForm() {
           max_depth: maxDepth,
           max_pages: maxPages,
           same_host_only: sameHostOnly,
+          use_sitemap: useSitemap,
           store: true,
         }),
       });
@@ -226,6 +228,16 @@ export default function CrawlForm() {
               className="h-4 w-4 rounded border-neutral-300 text-[#0B1739] focus:ring-neutral-300 disabled:opacity-50"
             />
             Same host only
+          </label>
+          <label className="inline-flex cursor-pointer items-center gap-2 text-neutral-700 dark:text-neutral-300">
+            <input
+              type="checkbox"
+              checked={useSitemap}
+              onChange={(e) => setUseSitemap(e.target.checked)}
+              disabled={!followLinks}
+              className="h-4 w-4 rounded border-neutral-300 text-[#0B1739] focus:ring-neutral-300 disabled:opacity-50"
+            />
+            Use sitemap
           </label>
 
           <button

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Literal
 
 from . import crawler, db, observability
 from .config import settings
@@ -31,7 +31,7 @@ def make_cache_lookup(store: bool) -> Callable | None:
 async def run_crawl(
     *,
     url: str,
-    render: str = "auto",
+    render: Literal["auto", "static", "js"] = "auto",
     follow_links: bool = False,
     max_depth: int = 1,
     max_pages: int = 10,
@@ -47,7 +47,7 @@ async def run_crawl(
     if follow_links:
         results = await crawler.crawl_site(
             url,
-            render=render,  # type: ignore[arg-type]
+            render=render,
             max_depth=max_depth,
             max_pages=max_pages,
             same_host_only=same_host_only,
@@ -64,9 +64,9 @@ async def run_crawl(
             if row:
                 cached = {"etag": row.get("etag"), "last_modified": row.get("last_modified")}
         if cached:
-            res = await crawler.crawl_one(url, render=render, cached=cached)  # type: ignore[arg-type]
+            res = await crawler.crawl_one(url, render=render, cached=cached)
         else:
-            res = await crawler.crawl_one(url, render=render)  # type: ignore[arg-type]
+            res = await crawler.crawl_one(url, render=render)
         if res.get("not_modified") and store:
             row = await db.get_page_by_url(url)
             results = [row or res]

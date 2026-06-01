@@ -74,7 +74,7 @@ async def get_page_html(url: str) -> str:
     html = await db.get_page_html(int(row["id"]))
     if html is None:
         return json.dumps({"error": "no stored HTML"})
-    return html
+    return json.dumps({"html": html})
 
 
 @mcp.tool()

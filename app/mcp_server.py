@@ -23,6 +23,16 @@ def _strip_html(page: dict) -> dict:
     return page
 
 
+async def _store(results: list[dict]) -> list[dict]:
+    saved = await asyncio.gather(
+        *(db.upsert_page(r) for r in results), return_exceptions=True
+    )
+    out = []
+    for original, result in zip(results, saved, strict=True):
+        out.append(original if isinstance(result, Exception) else result)
+    return out
+
+
 @mcp.tool()
 async def crawl(
     url: str,
@@ -33,10 +43,10 @@ async def crawl(
     same_host_only: bool = True,
     store: bool = True,
 ) -> str:
-    """Crawl a URL and return extracted text.
+    """Crawl a URL and return extracted text and markdown.
 
     - render: "auto" tries static first then falls back to JS rendering.
-    - follow_links: when true, performs a BFS up to max_depth/max_pages.
+    - follow_links: when true, performs a polite BFS up to max_depth/max_pages.
     - store: persist results in Postgres.
     """
     if follow_links:
@@ -48,14 +58,12 @@ async def crawl(
             same_host_only=same_host_only,
         )
     else:
-        results = [await crawl_one(url, render=render)]
+        results = [await crawl_one(url, render=render, check_robots=True)]
 
-    if store:
-        saved_pages = await asyncio.gather(*(db.upsert_page(r) for r in results))
-        out = [_strip_html(p) for p in saved_pages]
-    else:
-        out = [_strip_html(r) for r in results]
-    return json.dumps({"count": len(out), "pages": out}, default=str)
+    out = await _store(results) if store else list(results)
+    return json.dumps(
+        {"count": len(out), "pages": [_strip_html(p) for p in out]}, default=str
+    )
 
 
 @mcp.tool()

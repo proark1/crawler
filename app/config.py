@@ -88,6 +88,7 @@ class Settings(BaseSettings):
     emit_markdown: bool = True  # include a Markdown rendering of the main content
     extract_pdf: bool = True  # extract text from PDF responses (needs the [pdf] extra)
     detect_language: bool = True  # detect language from text (needs the [lang] extra)
+    dedup_by_content: bool = True  # in a site crawl, don't re-expand duplicate-content pages
 
     # Discovery: seed follow-link crawls from sitemap.xml / robots Sitemap: lines.
     use_sitemap: bool = True

@@ -412,7 +412,7 @@ async def test_crawl_site_seeds_from_sitemap(monkeypatch):
     monkeypatch.setattr(settings, "use_sitemap", True)
 
     results = await crawler.crawl_site(
-        "https://x.com/", max_depth=0, max_pages=10, use_sitemap=True
+        "https://x.com/", max_depth=1, max_pages=10, use_sitemap=True
     )
     urls = {r["url"] for r in results}
     assert "https://x.com" in urls  # start

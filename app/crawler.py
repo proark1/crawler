@@ -541,17 +541,33 @@ def _parse_sitemap(xml: str) -> tuple[list[str], bool]:
 
 
 async def _fetch_sitemap_text(url: str) -> str | None:
-    await ssrf.assert_url_allowed(url)
+    # Follow redirects manually, validating each hop, so a sitemap URL can't
+    # redirect us into an internal service (SSRF).
     client = httpclient.get_client(None)
-    resp = await client.get(
-        url, headers=antibot.browser_headers(url), follow_redirects=True
-    )
+    current = url
+    resp = None
+    for _ in range(settings.max_redirects + 1):
+        await ssrf.assert_url_allowed(current)
+        resp = await client.get(
+            current, headers=antibot.browser_headers(current), follow_redirects=False
+        )
+        if 300 <= resp.status_code < 400:
+            location = resp.headers.get("location")
+            if not location:
+                return None
+            current = urljoin(current, location)
+            continue
+        break
+    else:
+        return None
+
     if resp.status_code >= 400:
         return None
     content = resp.content
     if len(content) > settings.max_response_bytes:
         return None
-    if url.endswith(".gz") or resp.headers.get("content-type", "").endswith("gzip"):
+    # Detect gzip by magic bytes (robust against missing extension / wrong type).
+    if content.startswith(b"\x1f\x8b"):
         import gzip
 
         try:
@@ -1140,7 +1156,8 @@ async def crawl_site(
     queue.put_nowait((start, 0))
 
     # Seed from the site's sitemap(s) so discovery isn't limited to in-page links.
-    if use_sitemap and settings.use_sitemap:
+    # Only when multi-page crawling is enabled (max_depth == 0 = start URL only).
+    if use_sitemap and settings.use_sitemap and max_depth > 0:
         try:
             for loc in await discover_sitemap_urls(start):
                 norm = _normalize(loc)

@@ -335,6 +335,15 @@ def test_extract_structured_metadata():
     assert m["schema_type"] == "Article"
 
 
+def test_extract_adds_reading_stats():
+    html = "<html><head><title>T</title></head><body><p>%s</p></body></html>" % (
+        "word " * 250
+    )
+    ext = crawler._extract_sync(html, "https://ex.com/")
+    assert ext.metadata["word_count"] >= 200
+    assert ext.metadata["reading_time_min"] >= 1
+
+
 def test_extract_jsonld_product_and_graph():
     html = """
     <html><head><title>Shoe</title>

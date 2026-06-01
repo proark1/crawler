@@ -69,6 +69,9 @@ export default async function PageDetail({ params }: { params: Params }) {
         <Pill label="Render" value={page.render_mode} mono />
         {page.status != null && <Pill label="Status" value={String(page.status)} mono />}
         {typeof meta.language === "string" && <Pill label="Lang" value={meta.language} />}
+        {typeof meta.reading_time_min === "number" && meta.reading_time_min > 0 && (
+          <Pill value={`${meta.reading_time_min} min read`} />
+        )}
         {typeof meta.author === "string" && <Pill label="Author" value={meta.author} />}
         {typeof meta.schema_type === "string" && <Pill label="Type" value={meta.schema_type} />}
         {block?.vendor && (

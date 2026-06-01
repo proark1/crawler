@@ -40,23 +40,26 @@ export default async function PagesIndex({
     <div className="space-y-6">
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
-          <h1 className="text-[22px] font-semibold tracking-tight text-neutral-900">
+          <h1 className="text-[22px] font-semibold tracking-tight text-neutral-900 dark:text-neutral-100">
             Pages
           </h1>
-          <p className="mt-1 text-sm text-neutral-500">
+          <p className="mt-1 text-sm text-neutral-500 dark:text-neutral-400">
             {q ? `${total} result${total === 1 ? "" : "s"} for "${q}"` : `${total} stored`}
           </p>
         </div>
 
-        <Link
-          href="/"
-          className="inline-flex items-center gap-1.5 rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm font-medium text-neutral-700 hover:bg-neutral-50"
-        >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4">
-            <path d="M12 5v14M5 12h14" />
-          </svg>
-          New crawl
-        </Link>
+        <div className="flex items-center gap-2">
+          <ExportMenu />
+          <Link
+            href="/"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm font-medium text-neutral-700 hover:bg-neutral-50 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-300 dark:hover:bg-neutral-800"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4">
+              <path d="M12 5v14M5 12h14" />
+            </svg>
+            New crawl
+          </Link>
+        </div>
       </div>
 
       <form className="flex gap-2">
@@ -72,12 +75,12 @@ export default async function PagesIndex({
             name="q"
             defaultValue={q ?? ""}
             placeholder="Search title, text, URL…"
-            className="h-10 w-full rounded-lg border border-neutral-200 bg-white pl-9 pr-3 text-sm text-neutral-900 placeholder:text-neutral-400 focus:border-neutral-300 focus:outline-none focus:ring-2 focus:ring-neutral-200"
+            className="h-10 w-full rounded-lg border border-neutral-200 bg-white pl-9 pr-3 text-sm text-neutral-900 placeholder:text-neutral-400 focus:border-neutral-300 focus:outline-none focus:ring-2 focus:ring-neutral-200 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100"
           />
         </label>
         <button
           type="submit"
-          className="rounded-lg bg-[#0B1739] px-4 py-2 text-sm font-medium text-white shadow-sm hover:opacity-90"
+          className="rounded-lg bg-[#0B1739] px-4 py-2 text-sm font-medium text-white shadow-sm hover:opacity-90 dark:bg-indigo-600"
         >
           Search
         </button>
@@ -87,7 +90,7 @@ export default async function PagesIndex({
 
       {!q && totalPages > 1 && (
         <div className="flex items-center justify-between text-sm">
-          <span className="text-neutral-500">
+          <span className="text-neutral-500 dark:text-neutral-400">
             Page {pageNum} of {totalPages}
           </span>
           <div className="flex gap-2">
@@ -96,6 +99,23 @@ export default async function PagesIndex({
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function ExportMenu() {
+  const base =
+    "inline-flex items-center gap-1.5 rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm font-medium text-neutral-700 hover:bg-neutral-50 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-300 dark:hover:bg-neutral-800";
+  return (
+    <div className="flex items-center gap-1">
+      <a href="/api/pages/export?format=json" className={base}>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4">
+          <path d="M12 3v12m0 0l-4-4m4 4l4-4M5 21h14" />
+        </svg>
+        JSON
+      </a>
+      <a href="/api/pages/export?format=csv" className={base}>CSV</a>
+      <a href="/api/pages/export?format=md" className={base}>MD</a>
     </div>
   );
 }
@@ -111,7 +131,7 @@ function PageLink({
 }) {
   if (disabled) {
     return (
-      <span className="cursor-not-allowed rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-1.5 text-neutral-300">
+      <span className="cursor-not-allowed rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-1.5 text-neutral-300 dark:border-neutral-800 dark:bg-neutral-800 dark:text-neutral-600">
         {label}
       </span>
     );
@@ -119,7 +139,7 @@ function PageLink({
   return (
     <Link
       href={`/pages?page=${page}`}
-      className="rounded-lg border border-neutral-200 bg-white px-3 py-1.5 text-neutral-700 hover:bg-neutral-50"
+      className="rounded-lg border border-neutral-200 bg-white px-3 py-1.5 text-neutral-700 hover:bg-neutral-50 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-300 dark:hover:bg-neutral-800"
     >
       {label}
     </Link>

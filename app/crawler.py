@@ -272,6 +272,11 @@ def _is_html(content_type: str | None) -> bool:
     return ct.startswith("text/") or ct in _HTML_CONTENT_TYPES
 
 
+def _is_pdf(content_type: str | None) -> bool:
+    ct = (content_type or "").split(";", 1)[0].strip().lower()
+    return ct in ("application/pdf", "application/x-pdf")
+
+
 def _content_hash(text: str | None) -> str | None:
     if not text:
         return None
@@ -733,7 +738,7 @@ async def _fetch_static(url: str, cached: dict | None = None) -> StaticFetch:
                     )
                 content_type = resp.headers.get("content-type")
                 is_5xx = 500 <= resp.status_code < 600
-                is_pdf = (content_type or "").split(";", 1)[0].strip().lower() == "application/pdf"
+                is_pdf = _is_pdf(content_type)
                 if not _is_html(content_type) and not (is_pdf and settings.extract_pdf):
                     await resp.aclose()
                     # A non-HTML 5xx that isn't a recognised block is a genuine
@@ -830,9 +835,16 @@ async def _fetch_impersonate(url: str, cached: dict | None = None) -> StaticFetc
                            etag, last_modified, not_modified=True, headers=kept)
     content_type = resp_headers.get("content-type")
     content = resp.content or b""
-    if not _is_html(content_type) or len(content) > settings.max_response_bytes:
+    if len(content) > settings.max_response_bytes:
         return StaticFetch(resp.status_code, final_url, content_type, None,
-                           etag, last_modified, headers=kept)
+                           etag, last_modified, headers=kept, kind="other")
+    if _is_pdf(content_type) and settings.extract_pdf:
+        pdf_text = await asyncio.to_thread(pdfextract.extract_text, content)
+        return StaticFetch(resp.status_code, final_url, content_type, pdf_text,
+                           etag, last_modified, headers=kept, kind="pdf")
+    if not _is_html(content_type):
+        return StaticFetch(resp.status_code, final_url, content_type, None,
+                           etag, last_modified, headers=kept, kind="other")
     text = content.decode(resp.encoding or "utf-8", errors="replace")
     return StaticFetch(resp.status_code, final_url, content_type, text,
                        etag, last_modified, headers=kept)
@@ -1083,9 +1095,13 @@ async def _crawl_escalating(
                 concurrency.limiter.record_success(host)
                 return result
             # Extraction unavailable/failed -> treat as a skipped non-HTML body.
+            # The HTTP request still succeeded, so record success like other skips.
             result["metadata"]["content_type"] = content_type
             result["metadata"]["skipped"] = "pdf (no text extracted)"
             result["render_mode"] = "pdf"
+            if settings.antibot_enabled:
+                antibot.profiles.record_success(url, tier)
+            concurrency.limiter.record_success(host)
             return result
 
         render_mode = "js" if tier == int(Tier.BROWSER) else "static"

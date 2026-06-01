@@ -29,10 +29,11 @@ connects to the IP we just validated). httpcore still performs the TLS handshake
 against the original hostname, so SNI and certificate verification remain
 correct. The IP that is checked is the IP that is connected to.
 
-**Residual gap:** the headless browser (Playwright, used for JS rendering) does
-its own DNS, so there it relies on per-subrequest validation rather than IP
-pinning. For defence in depth on sensitive deployments, run the crawler in a
-network segment where private/internal ranges are firewalled off at egress.
+**Residual gap:** the headless browser (Playwright, used for JS rendering) and
+the optional `curl_cffi` impersonation engine do their own DNS, so there the
+crawler relies on per-request/per-subrequest validation rather than IP pinning.
+For defence in depth on sensitive deployments, run the crawler in a network
+segment where private/internal ranges are firewalled off at egress.
 
 ## Other controls
 

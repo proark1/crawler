@@ -56,12 +56,25 @@ async def _resolve(host: str) -> list[str]:
     return [info[4][0] for info in infos]
 
 
+# Short-TTL cache of validated resolutions, so a single request doesn't resolve
+# the host twice (once to validate, once to connect) and repeat crawls of a host
+# skip the lookup. Caching the *validated* IP also keeps the checked IP and the
+# connected IP identical within the TTL.
+_dns_cache: dict[str, tuple[float, list[str]]] = {}
+
+
 async def resolve_validated(host: str) -> list[str]:
     """Resolve a host to its IPs, raising BlockedAddressError if any is non-public.
 
     A literal IP is checked directly. Returns the list of validated IPs.
     """
     host = host.lower()
+    import time
+
+    hit = _dns_cache.get(host)
+    if hit is not None and (time.monotonic() - hit[0]) < settings.dns_cache_ttl:
+        return hit[1]
+
     try:
         ipaddress.ip_address(host)
         candidates = [host]
@@ -76,6 +89,10 @@ async def resolve_validated(host: str) -> list[str]:
     for ip in candidates:
         if not _ip_is_public(ip):
             raise BlockedAddressError(f"{host} resolves to non-public address {ip}")
+    if settings.dns_cache_ttl > 0:
+        _dns_cache[host] = (time.monotonic(), candidates)
+        if len(_dns_cache) > 10_000:
+            _dns_cache.clear()
     return candidates
 
 

@@ -7,27 +7,19 @@ function normalizeBase(raw: string): string {
   return `https://${trimmed}`;
 }
 
+import type { CrawlResponse, JobStatus, Page } from "./types";
+
+export type { CrawlResponse, JobStatus, Page } from "./types";
+
 const BASE = normalizeBase(process.env.CRAWLER_API_URL ?? "http://localhost:8000");
 const KEY = process.env.CRAWLER_API_KEY ?? "";
 
-export type Page = {
-  id: number | null;
-  url: string;
-  final_url: string | null;
-  status: number | null;
-  title: string | null;
-  text: string | null;
-  links: string[];
-  metadata: Record<string, unknown>;
-  render_mode: string;
-  error: string | null;
-  fetched_at: string | null;
-};
-
-export type CrawlResponse = {
-  count: number;
-  pages: Page[];
-};
+/** Server-side only: base URL + auth headers for proxy routes (keeps the key off the client). */
+export function backendTarget(path: string): { url: string; headers: Record<string, string> } {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (KEY) headers["X-API-Key"] = KEY;
+  return { url: `${BASE}${path}`, headers };
+}
 
 type Init = Omit<RequestInit, "headers"> & {
   headers?: Record<string, string>;
@@ -35,15 +27,10 @@ type Init = Omit<RequestInit, "headers"> & {
 };
 
 export async function apiFetch<T>(path: string, init: Init = {}): Promise<T> {
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    ...(init.headers ?? {}),
-  };
-  if (KEY) headers["X-API-Key"] = KEY;
-
-  const res = await fetch(`${BASE}${path}`, {
+  const { url, headers } = backendTarget(path);
+  const res = await fetch(url, {
     ...init,
-    headers,
+    headers: { ...headers, ...(init.headers ?? {}) },
     cache: init.cache ?? "no-store",
   });
   if (!res.ok) {
@@ -56,8 +43,10 @@ export async function apiFetch<T>(path: string, init: Init = {}): Promise<T> {
 export const api = {
   crawl: (body: Record<string, unknown>) =>
     apiFetch<CrawlResponse>("/crawl", { method: "POST", body: JSON.stringify(body) }),
-  list: (limit = 50, offset = 0) =>
-    apiFetch<Page[]>(`/pages?limit=${limit}&offset=${offset}`),
+  startJob: (body: Record<string, unknown>) =>
+    apiFetch<{ job_id: number }>("/jobs", { method: "POST", body: JSON.stringify(body) }),
+  job: (id: number) => apiFetch<JobStatus>(`/jobs/${id}`),
+  list: (limit = 50, offset = 0) => apiFetch<Page[]>(`/pages?limit=${limit}&offset=${offset}`),
   search: (q: string, limit = 50) =>
     apiFetch<Page[]>(`/pages/search?q=${encodeURIComponent(q)}&limit=${limit}`),
   get: (id: number) => apiFetch<Page>(`/pages/${id}`),

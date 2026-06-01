@@ -1,21 +1,15 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useCallback, useRef, useState } from "react";
+import type { Page, SseEvent } from "@/lib/types";
 
-type Page = {
-  id: number | null;
-  url: string;
-  final_url: string | null;
-  status: number | null;
-  title: string | null;
-  text: string | null;
-  links: string[];
-  render_mode: string;
-  error: string | null;
-};
+type Status = "idle" | "running" | "done" | "error";
 
-type CrawlResponse = { count: number; pages: Page[] };
+function clampInt(value: number, min: number, max: number, fallback: number): number {
+  if (!Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(value)));
+}
 
 export default function CrawlForm() {
   const [url, setUrl] = useState("");
@@ -25,49 +19,102 @@ export default function CrawlForm() {
   const [maxPages, setMaxPages] = useState(10);
   const [sameHostOnly, setSameHostOnly] = useState(true);
 
-  const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<CrawlResponse | null>(null);
+  const [status, setStatus] = useState<Status>("idle");
+  const [pages, setPages] = useState<Page[]>([]);
   const [error, setError] = useState<string | null>(null);
+
+  const esRef = useRef<EventSource | null>(null);
+  const seenRef = useRef<Set<string>>(new Set());
+
+  const finish = useCallback((next: Status, message?: string) => {
+    esRef.current?.close();
+    esRef.current = null;
+    setStatus(next);
+    if (message) setError(message);
+  }, []);
+
+  const addPage = useCallback((p: Page) => {
+    const key = p.id != null ? `id:${p.id}` : `url:${p.url}`;
+    if (seenRef.current.has(key)) return;
+    seenRef.current.add(key);
+    setPages((prev) => [...prev, p]);
+  }, []);
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
-    setLoading(true);
+    esRef.current?.close();
+    seenRef.current = new Set();
+    setPages([]);
     setError(null);
-    setResult(null);
+    setStatus("running");
+
     try {
-      const res = await fetch("/api/crawl", {
+      const res = await fetch("/api/jobs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           url,
           render,
           follow_links: followLinks,
-          max_depth: maxDepth,
-          max_pages: maxPages,
+          max_depth: clampInt(maxDepth, 0, 5, 1),
+          max_pages: clampInt(maxPages, 1, 100, 10),
           same_host_only: sameHostOnly,
           store: true,
         }),
       });
-      if (!res.ok) throw new Error(await res.text());
-      setResult((await res.json()) as CrawlResponse);
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({ error: res.statusText }));
+        throw new Error(body.error ?? `Request failed (${res.status})`);
+      }
+      const { job_id } = (await res.json()) as { job_id: number };
+
+      const es = new EventSource(`/api/jobs/${job_id}/events`);
+      esRef.current = es;
+      es.onmessage = (ev) => {
+        const data = JSON.parse(ev.data) as SseEvent;
+        if (data.type === "snapshot") {
+          data.pages.forEach(addPage);
+        } else if (data.type === "page") {
+          addPage(data.page);
+        } else if (data.type === "done") {
+          if (data.status === "failed") finish("error", data.error ?? "Crawl failed");
+          else finish("done");
+        }
+      };
+      es.onerror = () => {
+        // The stream closes when the job ends; treat as completion if we have results.
+        if (esRef.current) finish(seenRef.current.size > 0 ? "done" : "error",
+          seenRef.current.size > 0 ? undefined : "Connection to crawler lost");
+      };
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setLoading(false);
+      finish("error", err instanceof Error ? err.message : String(err));
     }
   }
+
+  function cancel() {
+    finish("idle");
+    setError(null);
+  }
+
+  const running = status === "running";
 
   return (
     <div className="space-y-6">
       <form onSubmit={onSubmit} className="space-y-4">
-        <input
-          type="url"
-          required
-          placeholder="https://example.com"
-          value={url}
-          onChange={(e) => setUrl(e.target.value)}
-          className="w-full rounded-md border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-900 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-neutral-500"
-        />
+        <div>
+          <label htmlFor="url" className="sr-only">
+            URL to crawl
+          </label>
+          <input
+            id="url"
+            type="url"
+            required
+            placeholder="https://example.com"
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+            className="w-full rounded-md border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-900 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-neutral-500"
+          />
+        </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-sm">
           <label className="flex flex-col gap-1">
@@ -90,7 +137,7 @@ export default function CrawlForm() {
               min={0}
               max={5}
               value={maxDepth}
-              onChange={(e) => setMaxDepth(Number(e.target.value))}
+              onChange={(e) => setMaxDepth(clampInt(e.target.valueAsNumber, 0, 5, 1))}
               disabled={!followLinks}
               className="rounded-md border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-900 px-2 py-1.5 disabled:opacity-50"
             />
@@ -103,7 +150,7 @@ export default function CrawlForm() {
               min={1}
               max={100}
               value={maxPages}
-              onChange={(e) => setMaxPages(Number(e.target.value))}
+              onChange={(e) => setMaxPages(clampInt(e.target.valueAsNumber, 1, 100, 10))}
               disabled={!followLinks}
               className="rounded-md border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-900 px-2 py-1.5 disabled:opacity-50"
             />
@@ -130,30 +177,51 @@ export default function CrawlForm() {
           </label>
         </div>
 
-        <button
-          type="submit"
-          disabled={loading || !url}
-          className="rounded-md bg-neutral-900 dark:bg-neutral-100 text-white dark:text-neutral-900 px-4 py-2 text-sm font-medium disabled:opacity-50"
-        >
-          {loading ? "Crawling…" : "Crawl"}
-        </button>
+        <div className="flex items-center gap-3">
+          <button
+            type="submit"
+            disabled={running || !url}
+            aria-busy={running}
+            className="rounded-md bg-neutral-900 dark:bg-neutral-100 text-white dark:text-neutral-900 px-4 py-2 text-sm font-medium disabled:opacity-50"
+          >
+            {running ? "Crawling…" : "Crawl"}
+          </button>
+          {running && (
+            <button
+              type="button"
+              onClick={cancel}
+              className="rounded-md border border-neutral-300 dark:border-neutral-700 px-4 py-2 text-sm"
+            >
+              Cancel
+            </button>
+          )}
+          {running && (
+            <span aria-live="polite" className="text-sm text-neutral-500">
+              {pages.length} page{pages.length === 1 ? "" : "s"} so far…
+            </span>
+          )}
+        </div>
       </form>
 
       {error && (
-        <pre className="whitespace-pre-wrap rounded-md border border-red-300 bg-red-50 dark:bg-red-950/40 dark:border-red-800 px-3 py-2 text-sm text-red-800 dark:text-red-200">
+        <div
+          role="alert"
+          className="rounded-md border border-red-300 bg-red-50 dark:bg-red-950/40 dark:border-red-800 px-3 py-2 text-sm text-red-800 dark:text-red-200"
+        >
           {error}
-        </pre>
+        </div>
       )}
 
-      {result && (
+      {pages.length > 0 && (
         <div className="space-y-3">
-          <div className="text-sm text-neutral-600 dark:text-neutral-400">
-            {result.count} page{result.count === 1 ? "" : "s"} crawled
+          <div className="text-sm text-neutral-600 dark:text-neutral-400" aria-live="polite">
+            {pages.length} page{pages.length === 1 ? "" : "s"} crawled
+            {status === "done" ? " · done" : status === "running" ? " · crawling…" : ""}
           </div>
           <ul className="space-y-2">
-            {result.pages.map((p, i) => (
+            {pages.map((p, i) => (
               <li
-                key={p.id ?? i}
+                key={p.id ?? `${p.url}-${i}`}
                 className="rounded-md border border-neutral-200 dark:border-neutral-800 px-4 py-3"
               >
                 <div className="flex items-center gap-2 text-xs text-neutral-500">

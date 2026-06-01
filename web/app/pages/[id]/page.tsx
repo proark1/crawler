@@ -1,8 +1,12 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { api } from "@/lib/api";
+import Time from "../../components/time";
+import PageContent from "./page-content";
 
 type Params = Promise<{ id: string }>;
+
+const LINK_LIMIT = 200;
 
 export default async function PageDetail({ params }: { params: Params }) {
   const { id } = await params;
@@ -49,7 +53,7 @@ export default async function PageDetail({ params }: { params: Params }) {
         )}
         {page.fetched_at && (
           <span className="rounded bg-neutral-100 dark:bg-neutral-800 px-2 py-1">
-            {new Date(page.fetched_at).toLocaleString()}
+            <Time iso={page.fetched_at} />
           </span>
         )}
         {page.error && (
@@ -59,21 +63,16 @@ export default async function PageDetail({ params }: { params: Params }) {
         )}
       </div>
 
-      {page.text ? (
-        <article className="prose-sm whitespace-pre-wrap rounded-md border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 px-4 py-3 text-sm leading-relaxed">
-          {page.text}
-        </article>
-      ) : (
-        <p className="text-sm text-neutral-500">No extracted text.</p>
-      )}
+      <PageContent text={page.text} markdown={page.markdown} />
 
       {page.links?.length > 0 && (
         <details className="rounded-md border border-neutral-200 dark:border-neutral-800 px-4 py-3">
           <summary className="cursor-pointer text-sm font-medium">
             {page.links.length} link{page.links.length === 1 ? "" : "s"}
+            {page.links.length > LINK_LIMIT ? ` (showing first ${LINK_LIMIT})` : ""}
           </summary>
           <ul className="mt-3 space-y-1 text-xs">
-            {page.links.slice(0, 200).map((l) => (
+            {page.links.slice(0, LINK_LIMIT).map((l) => (
               <li key={l} className="truncate">
                 <a
                   href={l}

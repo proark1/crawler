@@ -1,15 +1,24 @@
 import Link from "next/link";
 import { api, type Page } from "@/lib/api";
+import Time from "../components/time";
 
-type SearchParams = Promise<{ q?: string }>;
+const PAGE_SIZE = 50;
 
-export default async function PagesIndex({
-  searchParams,
-}: {
-  searchParams: SearchParams;
-}) {
-  const { q } = await searchParams;
-  const pages: Page[] = q ? await api.search(q, 100) : await api.list(100);
+type SearchParams = Promise<{ q?: string; page?: string }>;
+
+export default async function PagesIndex({ searchParams }: { searchParams: SearchParams }) {
+  const sp = await searchParams;
+  const q = sp.q;
+  const pageNum = Math.max(1, Number(sp.page) || 1);
+  const offset = (pageNum - 1) * PAGE_SIZE;
+
+  // Search isn't paginated server-side; list view is, via limit/offset.
+  const pages: Page[] = q ? await api.search(q, 100) : await api.list(PAGE_SIZE, offset);
+  const hasNext = !q && pages.length === PAGE_SIZE;
+  const hasPrev = !q && pageNum > 1;
+
+  const pageHref = (n: number) =>
+    `/pages?${new URLSearchParams({ ...(q ? { q } : {}), page: String(n) })}`;
 
   return (
     <div className="space-y-6">
@@ -17,7 +26,7 @@ export default async function PagesIndex({
         <h1 className="text-2xl font-semibold tracking-tight">Pages</h1>
         <p className="mt-1 text-sm text-neutral-600 dark:text-neutral-400">
           {pages.length} result{pages.length === 1 ? "" : "s"}
-          {q ? ` for "${q}"` : ""}
+          {q ? ` for "${q}"` : ` · page ${pageNum}`}
         </p>
       </div>
 
@@ -27,6 +36,7 @@ export default async function PagesIndex({
           name="q"
           defaultValue={q ?? ""}
           placeholder="Search title, text, URL…"
+          aria-label="Search crawled pages"
           className="flex-1 rounded-md border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-900 px-3 py-2 text-sm"
         />
         <button
@@ -48,9 +58,7 @@ export default async function PagesIndex({
                 {p.render_mode}
               </span>
               {p.status && <span>{p.status}</span>}
-              {p.fetched_at && (
-                <span>{new Date(p.fetched_at).toLocaleString()}</span>
-              )}
+              {p.fetched_at && <Time iso={p.fetched_at} />}
             </div>
             {p.id != null ? (
               <Link href={`/pages/${p.id}`} className="block">
@@ -73,8 +81,26 @@ export default async function PagesIndex({
           </li>
         ))}
       </ul>
-      {pages.length === 0 && (
-        <p className="text-sm text-neutral-500">Nothing here yet.</p>
+
+      {pages.length === 0 && <p className="text-sm text-neutral-500">Nothing here yet.</p>}
+
+      {(hasPrev || hasNext) && (
+        <nav className="flex items-center justify-between pt-2 text-sm" aria-label="Pagination">
+          {hasPrev ? (
+            <Link href={pageHref(pageNum - 1)} className="text-blue-600 dark:text-blue-400 hover:underline">
+              ← Previous
+            </Link>
+          ) : (
+            <span />
+          )}
+          {hasNext ? (
+            <Link href={pageHref(pageNum + 1)} className="text-blue-600 dark:text-blue-400 hover:underline">
+              Next →
+            </Link>
+          ) : (
+            <span />
+          )}
+        </nav>
       )}
     </div>
   );

@@ -3,8 +3,8 @@ import Link from "next/link";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Crawler",
-  description: "Web crawler dashboard",
+  title: { default: "Crawler", template: "%s · Crawler" },
+  description: "Crawl pages, render JS when needed, and search extracted content.",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

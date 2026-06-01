@@ -7,6 +7,7 @@ export default function Home() {
         <h1 className="text-2xl font-semibold tracking-tight">New crawl</h1>
         <p className="mt-1 text-sm text-neutral-600 dark:text-neutral-400">
           Paste a URL. Static fetch first; Playwright kicks in if the page needs JS.
+          Results stream in live as each page is crawled.
         </p>
       </div>
       <CrawlForm />

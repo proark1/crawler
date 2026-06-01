@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import time
 from collections import defaultdict
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 from urllib.parse import urldefrag, urljoin, urlparse
 from urllib.robotparser import RobotFileParser
@@ -17,12 +22,14 @@ from tenacity import (
     wait_exponential,
 )
 
+from . import ssrf
 from .config import settings
 
 if TYPE_CHECKING:
-    from playwright.async_api import Browser, Playwright
+    from playwright.async_api import Browser, BrowserContext, Playwright
 
 RenderMode = Literal["auto", "static", "js"]
+CacheLookup = Callable[[str], Awaitable[dict | None]]
 
 _pw: Playwright | None = None
 _browser: Browser | None = None
@@ -38,6 +45,68 @@ _robots_lock = asyncio.Lock()
 
 # Content types we will attempt to parse as HTML.
 _HTML_CONTENT_TYPES = ("text/html", "application/xhtml+xml", "application/xml", "text/xml")
+
+
+# --------------------------------------------------------------------------- #
+# Browser lifecycle + context pool                                            #
+# --------------------------------------------------------------------------- #
+
+
+class _ContextPool:
+    """Pool of reusable Playwright contexts with resource blocking applied.
+
+    Reusing contexts avoids the per-request cost of spinning up a fresh context,
+    and routing lets us drop images/media/fonts so JS rendering is much faster.
+    """
+
+    def __init__(self) -> None:
+        self._pool: asyncio.Queue[BrowserContext] = asyncio.Queue()
+        self._created = 0
+        self._lock = asyncio.Lock()
+        self._all: list[BrowserContext] = []
+
+    async def _make(self) -> BrowserContext:
+        browser = await get_browser()
+        context = await browser.new_context(user_agent=settings.user_agent)
+        if settings.block_resources_in_js:
+            await context.route("**/*", _block_heavy_resources)
+        self._all.append(context)
+        return context
+
+    async def acquire(self) -> BrowserContext:
+        try:
+            return self._pool.get_nowait()
+        except asyncio.QueueEmpty:
+            pass
+        async with self._lock:
+            if self._created < max(1, settings.js_context_pool_size):
+                self._created += 1
+                return await self._make()
+        # Pool is at capacity; wait for one to be released.
+        return await self._pool.get()
+
+    async def release(self, context: BrowserContext) -> None:
+        await self._pool.put(context)
+
+    async def close(self) -> None:
+        for ctx in self._all:
+            try:
+                await ctx.close()
+            except Exception:  # noqa: BLE001
+                pass
+        self._all.clear()
+        self._created = 0
+        self._pool = asyncio.Queue()
+
+
+_context_pool = _ContextPool()
+
+
+async def _block_heavy_resources(route) -> None:  # type: ignore[no-untyped-def]
+    if route.request.resource_type in ("image", "media", "font"):
+        await route.abort()
+    else:
+        await route.continue_()
 
 
 async def get_browser() -> Browser:
@@ -58,8 +127,9 @@ async def get_browser() -> Browser:
 
 
 async def close_browser() -> None:
-    """Shut down the shared browser. Call on app shutdown."""
+    """Shut down the shared browser and context pool. Call on app shutdown."""
     global _pw, _browser
+    await _context_pool.close()
     if _browser is not None:
         try:
             await _browser.close()
@@ -72,8 +142,33 @@ async def close_browser() -> None:
             _pw = None
 
 
+# --------------------------------------------------------------------------- #
+# Result / fetch data types                                                   #
+# --------------------------------------------------------------------------- #
+
+
 class CrawlResult(dict):
     """Plain dict result; keeping a class for clarity at call sites."""
+
+
+@dataclass
+class StaticFetch:
+    status: int
+    final_url: str
+    content_type: str | None
+    text: str | None
+    etag: str | None = None
+    last_modified: str | None = None
+    not_modified: bool = False
+
+
+@dataclass
+class Extraction:
+    title: str | None = None
+    text: str | None = None
+    markdown: str | None = None
+    links: list[str] = field(default_factory=list)
+    metadata: dict = field(default_factory=dict)
 
 
 def _normalize(url: str) -> str:
@@ -88,18 +183,98 @@ def _is_html(content_type: str | None) -> bool:
     return ct.startswith("text/") or ct in _HTML_CONTENT_TYPES
 
 
-def _extract_sync(html: str, url: str) -> tuple[str | None, str | None, list[str], dict]:
+def _content_hash(text: str | None) -> str | None:
+    if not text:
+        return None
+    return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()
+
+
+# --------------------------------------------------------------------------- #
+# Extraction                                                                  #
+# --------------------------------------------------------------------------- #
+
+
+def _extract_structured_metadata(tree: HTMLParser, url: str) -> dict:
+    """Pull OpenGraph, JSON-LD, canonical URL, language, author, and date."""
+    meta: dict = {}
+
+    def first_attr(selector: str, attr: str) -> str | None:
+        node = tree.css_first(selector)
+        if node:
+            val = node.attributes.get(attr)
+            if val:
+                return val.strip()
+        return None
+
+    html_node = tree.css_first("html")
+    if html_node and html_node.attributes.get("lang"):
+        meta["language"] = html_node.attributes["lang"].strip()
+
+    canonical = first_attr('link[rel="canonical"]', "href")
+    if canonical:
+        meta["canonical"] = _normalize(urljoin(url, canonical))
+
+    description = first_attr('meta[name="description"]', "content") or first_attr(
+        'meta[property="og:description"]', "content"
+    )
+    if description:
+        meta["description"] = description
+
+    og: dict = {}
+    for node in tree.css('meta[property^="og:"]'):
+        prop = node.attributes.get("property")
+        content = node.attributes.get("content")
+        if prop and content:
+            og[prop[3:]] = content.strip()
+    if og:
+        meta["opengraph"] = og
+
+    author = first_attr('meta[name="author"]', "content")
+    if author:
+        meta["author"] = author
+
+    published = first_attr('meta[property="article:published_time"]', "content")
+    if published:
+        meta["published_at"] = published
+
+    # JSON-LD: capture a couple of widely useful fields without dragging in the
+    # entire (often huge) graph.
+    for node in tree.css('script[type="application/ld+json"]'):
+        raw = node.text()
+        if not raw:
+            continue
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        items = data if isinstance(data, list) else [data]
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if "author" not in meta:
+                a = item.get("author")
+                if isinstance(a, dict) and a.get("name"):
+                    meta["author"] = a["name"]
+                elif isinstance(a, str):
+                    meta["author"] = a
+            if "published_at" not in meta and item.get("datePublished"):
+                meta["published_at"] = item["datePublished"]
+            if item.get("@type") and "schema_type" not in meta:
+                meta["schema_type"] = item["@type"]
+        break  # one ld+json block is plenty
+
+    return meta
+
+
+def _extract_sync(html: str, url: str) -> Extraction:
     """CPU-bound parsing. Runs in a worker thread via asyncio.to_thread."""
-    title: str | None = None
-    text: str | None = None
-    links: list[str] = []
-    metadata: dict = {}
+    out = Extraction()
 
     try:
         tree = HTMLParser(html)
         title_node = tree.css_first("title")
         if title_node:
-            title = title_node.text(strip=True)
+            out.title = title_node.text(strip=True)
         seen: set[str] = set()
         for a in tree.css("a[href]"):
             href = a.attributes.get("href")
@@ -108,9 +283,11 @@ def _extract_sync(html: str, url: str) -> tuple[str | None, str | None, list[str
             absolute = _normalize(urljoin(url, href))
             if absolute.startswith(("http://", "https://")) and absolute not in seen:
                 seen.add(absolute)
-                links.append(absolute)
+                out.links.append(absolute)
+        if settings.extract_metadata:
+            out.metadata.update(_extract_structured_metadata(tree, url))
     except Exception as exc:  # noqa: BLE001
-        metadata["parse_error"] = str(exc)
+        out.metadata["parse_error"] = str(exc)
 
     try:
         extracted = trafilatura.extract(
@@ -121,20 +298,35 @@ def _extract_sync(html: str, url: str) -> tuple[str | None, str | None, list[str
             favor_recall=True,
         )
         if extracted:
-            text = extracted
+            out.text = extracted
     except Exception as exc:  # noqa: BLE001
-        metadata["extract_error"] = str(exc)
+        out.metadata["extract_error"] = str(exc)
 
-    return title, text, links, metadata
+    if settings.emit_markdown:
+        try:
+            md = trafilatura.extract(
+                html, url=url, include_comments=False, output_format="markdown"
+            )
+            if md:
+                out.markdown = md
+        except Exception:  # noqa: BLE001 -- markdown is best-effort
+            pass
+
+    return out
 
 
-async def _extract(html: str, url: str) -> tuple[str | None, str | None, list[str], dict]:
+async def _extract(html: str, url: str) -> Extraction:
     """Async wrapper that keeps heavy parsing off the event loop."""
     return await asyncio.to_thread(_extract_sync, html, url)
 
 
 def _looks_empty(text: str | None) -> bool:
     return not text or len(text.strip()) < 200
+
+
+# --------------------------------------------------------------------------- #
+# robots.txt + politeness                                                     #
+# --------------------------------------------------------------------------- #
 
 
 async def _get_robots(url: str) -> RobotFileParser | None:
@@ -147,13 +339,15 @@ async def _get_robots(url: str) -> RobotFileParser | None:
         if origin in _robots_cache:
             return _robots_cache[origin]
         rp: RobotFileParser | None = RobotFileParser()
+        robots_url = f"{origin}/robots.txt"
         try:
+            await ssrf.assert_url_allowed(robots_url)
             async with httpx.AsyncClient(
                 follow_redirects=True,
                 timeout=httpx.Timeout(min(settings.request_timeout, 10.0)),
                 headers={"User-Agent": settings.user_agent},
             ) as client:
-                resp = await client.get(f"{origin}/robots.txt")
+                resp = await client.get(robots_url)
             if resp.status_code >= 400:
                 rp = None  # no robots.txt -> allow everything
             else:
@@ -173,9 +367,23 @@ async def _allowed_by_robots(url: str) -> bool:
     return rp.can_fetch(settings.user_agent, url)
 
 
-async def _respect_delay(url: str) -> None:
-    """Enforce a minimum gap between hits to the same host."""
+async def _effective_delay(url: str) -> float:
     delay = settings.per_host_delay
+    if settings.respect_crawl_delay:
+        rp = await _get_robots(url)
+        if rp is not None:
+            try:
+                cd = rp.crawl_delay(settings.user_agent)
+            except Exception:  # noqa: BLE001
+                cd = None
+            if cd:
+                delay = max(delay, float(cd))
+    return delay
+
+
+async def _respect_delay(url: str) -> None:
+    """Enforce a minimum gap between hits to the same host (robots crawl-delay aware)."""
+    delay = await _effective_delay(url)
     if delay <= 0:
         return
     host = urlparse(url).netloc
@@ -197,9 +405,19 @@ def _is_transient(exc: BaseException) -> bool:
     return False
 
 
-async def _fetch_static(url: str) -> tuple[int, str, str | None, str | None]:
-    """Return (status, final_url, content_type, text). text is None for non-HTML/oversized."""
+# --------------------------------------------------------------------------- #
+# Fetching                                                                    #
+# --------------------------------------------------------------------------- #
+
+
+async def _fetch_static(url: str, cached: dict | None = None) -> StaticFetch:
+    """Fetch with manual, SSRF-validated redirects and optional conditional headers."""
     headers = {"User-Agent": settings.user_agent, "Accept": "text/html,*/*;q=0.8"}
+    if cached:
+        if cached.get("etag"):
+            headers["If-None-Match"] = cached["etag"]
+        if cached.get("last_modified"):
+            headers["If-Modified-Since"] = cached["last_modified"]
     timeout = httpx.Timeout(settings.request_timeout)
 
     @retry(
@@ -208,35 +426,63 @@ async def _fetch_static(url: str) -> tuple[int, str, str | None, str | None]:
         wait=wait_exponential(multiplier=0.5, max=8),
         reraise=True,
     )
-    async def _do() -> tuple[int, str, str | None, str | None]:
-        await _respect_delay(url)
+    async def _do() -> StaticFetch:
         async with httpx.AsyncClient(
-            follow_redirects=True, headers=headers, timeout=timeout
+            follow_redirects=False, headers=headers, timeout=timeout
         ) as client:
-            async with client.stream("GET", url) as resp:
-                resp.raise_for_status()
-                content_type = resp.headers.get("content-type")
-                if not _is_html(content_type):
-                    await resp.aclose()
-                    return resp.status_code, str(resp.url), content_type, None
-                chunks: list[bytes] = []
-                total = 0
-                async for chunk in resp.aiter_bytes():
-                    total += len(chunk)
-                    if total > settings.max_response_bytes:
+            current = url
+            for _ in range(settings.max_redirects + 1):
+                await ssrf.assert_url_allowed(current)
+                await _respect_delay(current)
+                async with client.stream("GET", current) as resp:
+                    if resp.is_redirect:
+                        location = resp.headers.get("location")
+                        if not location:
+                            resp.raise_for_status()
+                        current = urljoin(current, location)
+                        continue
+
+                    etag = resp.headers.get("etag")
+                    last_modified = resp.headers.get("last-modified")
+                    if resp.status_code == 304:
+                        return StaticFetch(
+                            304, current, resp.headers.get("content-type"),
+                            None, etag, last_modified, not_modified=True,
+                        )
+                    resp.raise_for_status()
+                    content_type = resp.headers.get("content-type")
+                    if not _is_html(content_type):
                         await resp.aclose()
-                        return resp.status_code, str(resp.url), content_type, None
-                    chunks.append(chunk)
-                body = b"".join(chunks)
-                text = body.decode(resp.encoding or "utf-8", errors="replace")
-                return resp.status_code, str(resp.url), content_type, text
+                        return StaticFetch(
+                            resp.status_code, str(resp.url), content_type, None,
+                            etag, last_modified,
+                        )
+                    chunks: list[bytes] = []
+                    total = 0
+                    async for chunk in resp.aiter_bytes():
+                        total += len(chunk)
+                        if total > settings.max_response_bytes:
+                            await resp.aclose()
+                            return StaticFetch(
+                                resp.status_code, str(resp.url), content_type, None,
+                                etag, last_modified,
+                            )
+                        chunks.append(chunk)
+                    body = b"".join(chunks)
+                    text = body.decode(resp.encoding or "utf-8", errors="replace")
+                    return StaticFetch(
+                        resp.status_code, str(resp.url), content_type, text,
+                        etag, last_modified,
+                    )
+            raise httpx.HTTPError(f"too many redirects (>{settings.max_redirects})")
 
     return await _do()
 
 
 async def _fetch_js(url: str) -> tuple[int, str, str]:
-    browser = await get_browser()
-    context = await browser.new_context(user_agent=settings.user_agent)
+    await ssrf.assert_url_allowed(url)
+    context = await _context_pool.acquire()
+    page = None
     try:
         await _respect_delay(url)
         page = await context.new_page()
@@ -248,6 +494,9 @@ async def _fetch_js(url: str) -> tuple[int, str, str]:
             timeout=settings.js_render_timeout * 1000,
         )
         status = response.status if response is not None else 200
+        final_url = page.url
+        # Validate the post-redirect landing URL too (browser may have followed 3xx).
+        await ssrf.assert_url_allowed(final_url)
         # Give client-side rendering a brief moment to settle, but never block
         # forever waiting for networkidle on pages that never go idle.
         try:
@@ -257,12 +506,35 @@ async def _fetch_js(url: str) -> tuple[int, str, str]:
         except Exception:  # noqa: BLE001 -- networkidle is best-effort
             pass
         html = await page.content()
-        return status, page.url, html
+        return status, final_url, html
     finally:
-        await context.close()
+        if page is not None:
+            await page.close()
+        await _context_pool.release(context)
 
 
-async def crawl_one(url: str, render: RenderMode = "auto") -> CrawlResult:
+# --------------------------------------------------------------------------- #
+# Single page                                                                 #
+# --------------------------------------------------------------------------- #
+
+
+def _apply_extraction(result: CrawlResult, ext: Extraction, *, render_mode: str | None = None) -> None:
+    merged_meta = {**result["metadata"], **ext.metadata}
+    result.update(
+        title=ext.title,
+        text=ext.text,
+        markdown=ext.markdown,
+        links=ext.links,
+        metadata=merged_meta,
+    )
+    result["content_hash"] = _content_hash(ext.text)
+    if render_mode:
+        result["render_mode"] = render_mode
+
+
+async def crawl_one(
+    url: str, render: RenderMode = "auto", cached: dict | None = None
+) -> CrawlResult:
     url = _normalize(url)
     result = CrawlResult(
         url=url,
@@ -270,12 +542,25 @@ async def crawl_one(url: str, render: RenderMode = "auto") -> CrawlResult:
         status=None,
         title=None,
         text=None,
+        markdown=None,
         html=None,
         links=[],
         metadata={},
         render_mode="static",
         error=None,
+        etag=None,
+        last_modified=None,
+        content_hash=None,
+        not_modified=False,
+        from_cache=False,
     )
+
+    try:
+        await ssrf.assert_url_allowed(url)
+    except ssrf.BlockedAddressError as exc:
+        result["error"] = f"blocked: {exc}"
+        result["metadata"]["ssrf"] = str(exc)
+        return result
 
     if not await _allowed_by_robots(url):
         result["error"] = "blocked by robots.txt"
@@ -287,19 +572,23 @@ async def crawl_one(url: str, render: RenderMode = "auto") -> CrawlResult:
 
     if render in ("auto", "static"):
         try:
-            status, final_url, content_type, html = await _fetch_static(url)
-            result["status"] = status
-            result["final_url"] = final_url
-            if html is None:
-                # Non-HTML or oversized: record metadata, nothing to extract.
-                result["metadata"]["content_type"] = content_type
+            sf = await _fetch_static(url, cached=cached)
+            result["status"] = sf.status
+            result["final_url"] = sf.final_url
+            result["etag"] = sf.etag
+            result["last_modified"] = sf.last_modified
+            if sf.not_modified:
+                # Server says the stored copy is still current; let the caller reuse it.
+                result["not_modified"] = True
+                return result
+            if sf.text is None:
+                result["metadata"]["content_type"] = sf.content_type
                 result["metadata"]["skipped"] = "non-html or oversized body"
             else:
-                static_html = html
-                title, text, links, metadata = await _extract(html, final_url)
-                result.update(
-                    title=title, text=text, links=links, metadata=metadata, html=html
-                )
+                static_html = sf.text
+                ext = await _extract(sf.text, sf.final_url)
+                result["html"] = sf.text
+                _apply_extraction(result, ext)
         except Exception as exc:  # noqa: BLE001
             static_error = f"{type(exc).__name__}: {exc}"
             result["metadata"]["static_error"] = static_error
@@ -313,16 +602,9 @@ async def crawl_one(url: str, render: RenderMode = "auto") -> CrawlResult:
             status, final_url, html = await _fetch_js(url)
             result["status"] = status
             result["final_url"] = final_url
-            title, text, links, metadata = await _extract(html, final_url)
-            merged_meta = {**result["metadata"], **metadata}
-            result.update(
-                title=title,
-                text=text,
-                links=links,
-                metadata=merged_meta,
-                html=html,
-                render_mode="js",
-            )
+            ext = await _extract(html, final_url)
+            result["html"] = html
+            _apply_extraction(result, ext, render_mode="js")
         except Exception as exc:  # noqa: BLE001
             js_error = f"{type(exc).__name__}: {exc}"
             result["metadata"]["js_error"] = js_error
@@ -333,6 +615,11 @@ async def crawl_one(url: str, render: RenderMode = "auto") -> CrawlResult:
         result["error"] = static_error or "fetch failed"
 
     return result
+
+
+# --------------------------------------------------------------------------- #
+# Site crawl                                                                  #
+# --------------------------------------------------------------------------- #
 
 
 def _same_host(a: str, b: str) -> bool:
@@ -349,6 +636,32 @@ def _host_key(url: str) -> str:
     return host
 
 
+def _is_fresh(row: dict, max_age: float) -> bool:
+    if max_age <= 0 or row.get("error"):
+        return False
+    fetched = row.get("fetched_at")
+    if not fetched:
+        return False
+    try:
+        dt = datetime.fromisoformat(str(fetched))
+    except ValueError:
+        return False
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    age = (datetime.now(UTC) - dt).total_seconds()
+    return age < max_age
+
+
+def _row_to_result(row: dict) -> CrawlResult:
+    res = CrawlResult(row)
+    res["from_cache"] = True
+    return res
+
+
+# Public alias for callers outside this module (e.g. the API layer).
+is_fresh = _is_fresh
+
+
 async def crawl_site(
     start_url: str,
     render: RenderMode = "auto",
@@ -356,6 +669,7 @@ async def crawl_site(
     max_pages: int = 10,
     same_host_only: bool = True,
     concurrency: int | None = None,
+    cache_lookup: CacheLookup | None = None,
 ) -> list[CrawlResult]:
     max_depth = min(max_depth, settings.max_depth_hard_limit)
     max_pages = min(max_pages, settings.max_pages_hard_limit)
@@ -380,6 +694,23 @@ async def crawl_site(
             seen.add(link)
             queue.put_nowait((link, depth + 1))
 
+    async def fetch_with_cache(url: str) -> CrawlResult:
+        row = await cache_lookup(url) if cache_lookup else None
+        if row and _is_fresh(row, settings.recrawl_max_age):
+            return _row_to_result(row)
+        cached = (
+            {"etag": row.get("etag"), "last_modified": row.get("last_modified")}
+            if row
+            else None
+        )
+        if cached is None:
+            res = await crawl_one(url, render=render)
+        else:
+            res = await crawl_one(url, render=render, cached=cached)
+        if res.get("not_modified") and row:
+            return _row_to_result(row)
+        return res
+
     async def worker() -> None:
         while True:
             url, depth = await queue.get()
@@ -388,7 +719,7 @@ async def crawl_site(
                     over_budget = len(results) >= max_pages
                 if over_budget:
                     continue  # budget reached: drain the queue without fetching
-                res = await crawl_one(url, render=render)
+                res = await fetch_with_cache(url)
                 async with results_lock:
                     if len(results) < max_pages:
                         results.append(res)

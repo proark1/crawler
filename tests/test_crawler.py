@@ -1,8 +1,17 @@
 from __future__ import annotations
 
+from datetime import UTC
+
 import pytest
 
 from app import crawler
+from app.config import settings
+
+
+@pytest.fixture(autouse=True)
+def _disable_ssrf(monkeypatch):
+    # Unit tests use example hostnames; skip real DNS-based SSRF checks.
+    monkeypatch.setattr(settings, "block_private_addresses", False)
 
 
 def test_normalize_strips_fragment_and_trailing_slash():
@@ -37,12 +46,12 @@ def test_extract_sync_pulls_title_and_links():
     <body><a href="/a">A</a><a href="https://other.com/b">B</a>
     <p>%s</p></body></html>
     """ % ("lorem ipsum " * 60)
-    title, text, links, meta = crawler._extract_sync(html, "https://ex.com/")
-    assert title == "Hello"
-    assert "https://ex.com/a" in links
-    assert "https://other.com/b" in links
-    assert text and "lorem ipsum" in text
-    assert "parse_error" not in meta
+    ext = crawler._extract_sync(html, "https://ex.com/")
+    assert ext.title == "Hello"
+    assert "https://ex.com/a" in ext.links
+    assert "https://other.com/b" in ext.links
+    assert ext.text and "lorem ipsum" in ext.text
+    assert "parse_error" not in ext.metadata
 
 
 @pytest.mark.asyncio
@@ -61,8 +70,8 @@ async def test_is_transient_classification():
 async def test_crawl_one_static_path(monkeypatch):
     html = "<html><head><title>T</title></head><body><p>%s</p></body></html>" % ("word " * 80)
 
-    async def fake_static(url):
-        return 200, url, "text/html", html
+    async def fake_static(url, cached=None):
+        return crawler.StaticFetch(200, url, "text/html", html)
 
     async def fake_allowed(url):
         return True
@@ -92,8 +101,8 @@ async def test_crawl_one_respects_robots(monkeypatch):
 async def test_crawl_one_auto_falls_back_to_js_when_empty(monkeypatch):
     calls = {"js": 0}
 
-    async def fake_static(url):
-        return 200, url, "text/html", "<html><body></body></html>"
+    async def fake_static(url, cached=None):
+        return crawler.StaticFetch(200, url, "text/html", "<html><body></body></html>")
 
     async def fake_js(url):
         calls["js"] += 1
@@ -115,8 +124,8 @@ async def test_crawl_one_auto_falls_back_to_js_when_empty(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_crawl_one_skips_non_html(monkeypatch):
-    async def fake_static(url):
-        return 200, url, "application/pdf", None
+    async def fake_static(url, cached=None):
+        return crawler.StaticFetch(200, url, "application/pdf", None)
 
     async def allowed(url):
         return True
@@ -174,3 +183,98 @@ async def test_crawl_site_depth_limit(monkeypatch):
     )
     assert len(results) == 1
     assert results[0]["url"] == "https://ex.com/root"
+
+
+def test_content_hash_stable_and_none():
+    assert crawler._content_hash(None) is None
+    assert crawler._content_hash("") is None
+    h1 = crawler._content_hash("hello world")
+    h2 = crawler._content_hash("hello world")
+    assert h1 == h2 and len(h1) == 64
+
+
+def test_is_fresh_logic():
+    from datetime import datetime, timedelta
+
+    recent = (datetime.now(UTC) - timedelta(seconds=10)).isoformat()
+    old = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
+    assert crawler.is_fresh({"fetched_at": recent}, 60)
+    assert not crawler.is_fresh({"fetched_at": old}, 60)
+    assert not crawler.is_fresh({"fetched_at": recent}, 0)  # disabled
+    assert not crawler.is_fresh({"fetched_at": recent, "error": "x"}, 60)  # errors not fresh
+
+
+def test_extract_structured_metadata():
+    html = """
+    <html lang="en"><head><title>T</title>
+    <link rel="canonical" href="https://ex.com/canonical"/>
+    <meta name="description" content="A description"/>
+    <meta property="og:title" content="OG Title"/>
+    <meta name="author" content="Jane Doe"/>
+    <script type="application/ld+json">{"@type":"Article","datePublished":"2024-01-02"}</script>
+    </head><body><p>body</p></body></html>
+    """
+    ext = crawler._extract_sync(html, "https://ex.com/page")
+    m = ext.metadata
+    assert m["language"] == "en"
+    assert m["canonical"] == "https://ex.com/canonical"
+    assert m["description"] == "A description"
+    assert m["opengraph"]["title"] == "OG Title"
+    assert m["author"] == "Jane Doe"
+    assert m["published_at"] == "2024-01-02"
+    assert m["schema_type"] == "Article"
+
+
+@pytest.mark.asyncio
+async def test_crawl_site_serves_fresh_from_cache(monkeypatch):
+    from datetime import datetime
+
+    fetched = datetime.now(UTC).isoformat()
+
+    async def lookup(url):
+        return {
+            "url": url, "render_mode": "static", "error": None,
+            "fetched_at": fetched, "links": [], "title": "cached",
+        }
+
+    async def fake_crawl_one(url, render="auto", cached=None):
+        raise AssertionError("should not fetch a fresh cached page")
+
+    monkeypatch.setattr(crawler, "crawl_one", fake_crawl_one)
+    monkeypatch.setattr(settings, "recrawl_max_age", 300.0)
+
+    results = await crawler.crawl_site(
+        "https://ex.com/x", max_depth=0, max_pages=5, cache_lookup=lookup
+    )
+    assert len(results) == 1
+    assert results[0]["from_cache"] is True
+    assert results[0]["title"] == "cached"
+
+
+@pytest.mark.asyncio
+async def test_crawl_site_not_modified_reuses_stored(monkeypatch):
+    from datetime import datetime, timedelta
+
+    old = (datetime.now(UTC) - timedelta(hours=5)).isoformat()
+
+    async def lookup(url):
+        return {
+            "url": url, "render_mode": "static", "error": None, "fetched_at": old,
+            "etag": "abc", "links": [], "title": "stored",
+        }
+
+    async def fake_crawl_one(url, render="auto", cached=None):
+        assert cached == {"etag": "abc", "last_modified": None}
+        return crawler.CrawlResult(
+            url=url, render_mode="static", links=[], not_modified=True
+        )
+
+    monkeypatch.setattr(crawler, "crawl_one", fake_crawl_one)
+    monkeypatch.setattr(settings, "recrawl_max_age", 60.0)
+
+    results = await crawler.crawl_site(
+        "https://ex.com/y", max_depth=0, max_pages=5, cache_lookup=lookup
+    )
+    assert len(results) == 1
+    assert results[0]["from_cache"] is True
+    assert results[0]["title"] == "stored"

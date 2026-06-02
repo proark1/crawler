@@ -37,11 +37,19 @@ segment where private/internal ranges are firewalled off at egress.
 
 ## Other controls
 
-- **Authentication:** `X-API-Key` required on all endpoints except `/health`
-  when `API_KEY` is set; the service refuses to start in production
-  (`ENVIRONMENT=production`) if `API_KEY` is empty.
+- **Authentication:** `X-API-Key` required on all endpoints when `API_KEY` is
+  set, except the unauthenticated infra endpoints `/health`, `/ready`, and
+  `/metrics`. `/metrics` is deliberately open so Prometheus can scrape it (it
+  exposes only aggregate counters — no URLs or secrets); restrict it at the
+  network layer or set `ENABLE_METRICS=false` if that's not acceptable. The
+  service refuses to start in production (`ENVIRONMENT=production`) if `API_KEY`
+  is empty.
+- **Webhook SSRF:** background-job `webhook_url`s are validated the same way as
+  crawl targets (rejected if they resolve to a private/internal address), both
+  at submit time and again before each delivery.
 - **Rate limiting:** optional per-IP/key fixed-window limiter
-  (`RATE_LIMIT_PER_MINUTE`), with bounded memory.
+  (`RATE_LIMIT_PER_MINUTE`), with bounded memory. Infra endpoints
+  (`/health`, `/ready`, `/metrics`) are exempt.
 - **Resource guards:** response size cap (`MAX_RESPONSE_BYTES`), redirect cap
   (`MAX_REDIRECTS`), and content-type filtering.
 - **robots.txt** and `Crawl-delay` are respected by default.

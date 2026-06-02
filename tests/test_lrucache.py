@@ -30,6 +30,15 @@ def test_bounded_lru_setdefault():
     assert c.setdefault("x", 9) == 5  # existing value kept
 
 
+def test_bounded_lru_setdefault_keeps_stored_falsy_value():
+    # A legitimately-stored falsy value (0/None/False) must not be mistaken for
+    # "absent" and overwritten by setdefault.
+    c: BoundedLRU[str, int] = BoundedLRU(4)
+    assert c.setdefault("z", 0) == 0
+    assert c.setdefault("z", 7) == 0  # 0 is present, kept
+    assert c.get("z") == 0
+
+
 def test_ttl_cache_expires(monkeypatch):
     c: TTLCache[str, str] = TTLCache(10, ttl=100.0)
     now = [1000.0]

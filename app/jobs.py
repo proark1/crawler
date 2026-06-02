@@ -19,7 +19,7 @@ from typing import Any, Literal
 
 import httpx
 
-from . import db
+from . import db, ssrf
 from .config import settings
 
 log = logging.getLogger("crawler.jobs")
@@ -155,6 +155,14 @@ async def fire_webhook(job: Job) -> None:
     with exponential backoff so a brief receiver outage doesn't drop the event.
     """
     if not job.webhook_url:
+        return
+    # Re-validate at delivery time (defence in depth): the URL was checked on
+    # submit, but DNS can change, and this guards jobs restored from the DB that
+    # never went through the submit-time check.
+    try:
+        await ssrf.assert_url_allowed(job.webhook_url)
+    except ssrf.BlockedAddressError as exc:
+        log.warning("webhook for job %s refused (SSRF): %s", job.id, exc)
         return
     body = json.dumps(job.public(), default=str).encode()
     headers = {"Content-Type": "application/json"}

@@ -253,7 +253,7 @@ async def test_crawl_site_bfs_respects_max_pages_and_depth(monkeypatch):
     monkeypatch.setattr(crawler, "crawl_one", fake_crawl_one)
 
     results = await crawler.crawl_site(
-        "https://ex.com/0", max_depth=5, max_pages=5, same_host_only=True, concurrency=3
+        "https://ex.com/0", max_depth=5, max_pages=5, same_host_only=True, workers=3
     )
     assert len(results) == 5
     # same_host_only must have excluded other.com
@@ -276,7 +276,7 @@ async def test_crawl_site_dedups_identical_content(monkeypatch):
     monkeypatch.setattr(settings, "dedup_by_content", True)
 
     results = await crawler.crawl_site(
-        "https://x.com/0", max_depth=5, max_pages=10, concurrency=1
+        "https://x.com/0", max_depth=5, max_pages=10, workers=1
     )
     # Start page expands once; the next page is duplicate content and is not
     # re-expanded, so the crawl stops at 2 pages instead of running to max_pages.
@@ -297,7 +297,7 @@ async def test_crawl_site_depth_limit(monkeypatch):
     monkeypatch.setattr(crawler, "crawl_one", fake_crawl_one)
     # depth 0 => only the start URL is crawled, children not followed
     results = await crawler.crawl_site(
-        "https://ex.com/root", max_depth=0, max_pages=50, concurrency=2
+        "https://ex.com/root", max_depth=0, max_pages=50, workers=2
     )
     assert len(results) == 1
     assert results[0]["url"] == "https://ex.com/root"
@@ -564,3 +564,26 @@ async def test_crawl_site_not_modified_reuses_stored(monkeypatch):
     assert len(results) == 1
     assert results[0]["from_cache"] is True
     assert results[0]["title"] == "stored"
+
+
+@pytest.mark.asyncio
+async def test_crawl_site_sitemap_seeding_capped_to_max_pages(monkeypatch):
+    captured = {}
+
+    async def fake_discover(start, limit=None):
+        captured["limit"] = limit
+        return [f"https://x.com/p{i}" for i in range(100)]
+
+    async def fake_crawl_one(url, render="auto"):
+        return crawler.CrawlResult(url=url, links=[], render_mode="static", error=None)
+
+    monkeypatch.setattr(crawler, "discover_sitemap_urls", fake_discover)
+    monkeypatch.setattr(crawler, "crawl_one", fake_crawl_one)
+    monkeypatch.setattr(settings, "use_sitemap", True)
+
+    results = await crawler.crawl_site(
+        "https://x.com/", max_depth=1, max_pages=5, use_sitemap=True
+    )
+    # Discovery is capped to the page budget rather than seeding all 100 URLs.
+    assert captured["limit"] == 5
+    assert len(results) <= 5

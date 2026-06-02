@@ -128,3 +128,31 @@ async def test_cancel_finished_job_409(monkeypatch):
             await asyncio.sleep(0.02)
         cancelled = await c.delete(f"/crawl/jobs/{job_id}")
     assert cancelled.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_ready_is_exempt_from_rate_limit(monkeypatch):
+    """Infra probes hit /ready constantly; the limiter must never 429 it."""
+    async def up():
+        return True
+
+    monkeypatch.setattr(db, "ping", up)
+    monkeypatch.setattr(api.settings, "rate_limit_per_minute", 1)
+    async with _client() as c:
+        for _ in range(3):  # well past the limit of 1
+            r = await c.get("/ready")
+            assert r.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_job_rejects_private_webhook_url(monkeypatch):
+    """A webhook_url resolving to an internal address is rejected at submit (SSRF)."""
+    monkeypatch.setattr(api.settings, "block_private_addresses", True)
+    monkeypatch.setattr(api.settings, "ssrf_allowlist", "")
+    async with _client() as c:
+        r = await c.post(
+            "/crawl/jobs",
+            json={"url": "https://example.com", "webhook_url": "http://127.0.0.1:9/hook"},
+        )
+    assert r.status_code == 422
+    assert "webhook_url" in r.text

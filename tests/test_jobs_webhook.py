@@ -37,9 +37,13 @@ class _FakeClient:
 
 
 @pytest.fixture(autouse=True)
-def _reset():
+def _reset(monkeypatch):
     _FakeClient.calls = []
     _FakeClient.responses = []
+    # The fake webhook host doesn't resolve; allowlist it so the delivery-time
+    # SSRF guard (exercised separately below) doesn't block these signing/retry
+    # tests.
+    monkeypatch.setattr(settings, "ssrf_allowlist", "hook.example")
     yield
 
 
@@ -77,6 +81,17 @@ async def test_webhook_no_url_is_noop(monkeypatch):
     j = jobs.Job(id="j2", status="done", webhook_url=None)
     await jobs.fire_webhook(j)
     assert _FakeClient.calls == []
+
+
+@pytest.mark.asyncio
+async def test_webhook_refused_for_private_address(monkeypatch):
+    """A webhook pointing at an internal address must never be contacted (SSRF)."""
+    monkeypatch.setattr(jobs.httpx, "AsyncClient", _FakeClient)
+    monkeypatch.setattr(settings, "block_private_addresses", True)
+    monkeypatch.setattr(settings, "ssrf_allowlist", "")  # don't exempt anything
+    j = jobs.Job(id="j3", status="done", webhook_url="http://127.0.0.1:9/hook")
+    await jobs.fire_webhook(j)
+    assert _FakeClient.calls == []  # loopback target never contacted
 
 
 async def _noop():

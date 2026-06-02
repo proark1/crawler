@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field, HttpUrl
 
-from . import db, jobs, observability, service
+from . import db, jobs, observability, service, ssrf
 from .auth import require_api_key
 from .config import settings
 from .crawler import close_browser
@@ -204,6 +204,9 @@ async def stats() -> StatsResponse:
 
 @app.get("/metrics")
 async def metrics() -> Response:
+    # Intentionally unauthenticated so Prometheus can scrape without a key (it
+    # carries no URLs/secrets, only aggregate counters). Restrict exposure at the
+    # network layer if needed; set ENABLE_METRICS=false to disable entirely.
     if not observability.metrics_enabled():
         raise HTTPException(status_code=404, detail="metrics disabled")
     body, content_type = observability.render_metrics()
@@ -264,6 +267,16 @@ _idempotency: BoundedLRU[str, str] = BoundedLRU(2048)
 
 
 async def _start_job(req: CrawlRequest) -> jobs.Job:
+    # SSRF guard: the webhook target is user-supplied like the crawl URL, so a
+    # private/internal address must be rejected up front (and re-checked at
+    # delivery time, since DNS can change). Fail fast with 422 on submit.
+    if req.webhook_url is not None:
+        try:
+            await ssrf.assert_url_allowed(str(req.webhook_url))
+        except ssrf.BlockedAddressError as exc:
+            raise HTTPException(
+                status_code=422, detail=f"webhook_url not allowed: {exc}"
+            ) from exc
     job = await jobs.create_job(
         request=json.loads(req.model_dump_json()),
         webhook_url=str(req.webhook_url) if req.webhook_url else None,
@@ -434,7 +447,7 @@ async def stream_crawl_job(job_id: str) -> StreamingResponse:
             if snapshot != last:
                 last = snapshot
                 yield f"data: {json.dumps(data, default=str)}\n\n"
-            if data["status"] in ("done", "error"):
+            if data["status"] in ("done", "error", "cancelled"):
                 return
             await asyncio.sleep(1.0)
 

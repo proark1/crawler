@@ -33,7 +33,9 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):  # type: ignore[no-untyped-def]
         limit = settings.rate_limit_per_minute
-        if limit <= 0 or request.url.path in ("/health", "/metrics"):
+        # Never rate-limit infra probes/scrapes: orchestrators hit /health and
+        # /ready frequently from one source, and Prometheus polls /metrics.
+        if limit <= 0 or request.url.path in ("/health", "/ready", "/metrics"):
             return await call_next(request)
 
         now = time.monotonic()

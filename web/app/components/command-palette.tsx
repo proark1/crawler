@@ -62,18 +62,20 @@ export function CommandPaletteProvider({ children }: { children: React.ReactNode
     function onKey(e: KeyboardEvent) {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
-        setOpen((v) => {
+        if (!isOpen) {
           // Capture the pre-open focus when opening via the shortcut too.
-          if (!v) previouslyFocused.current = document.activeElement as HTMLElement | null;
-          return !v;
-        });
+          previouslyFocused.current = document.activeElement as HTMLElement | null;
+          setOpen(true);
+        } else {
+          close();
+        }
       } else if (e.key === "Escape") {
         close();
       }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [close]);
+  }, [isOpen, close]);
 
   // Focus trap + restore focus to the trigger when the palette closes.
   // (previouslyFocused is captured at open time, before the input autofocuses.)

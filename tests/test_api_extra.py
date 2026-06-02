@@ -158,3 +158,31 @@ async def test_job_rejects_private_webhook_url(monkeypatch):
         )
     assert r.status_code == 422
     assert "webhook_url" in r.text
+
+
+@pytest.mark.asyncio
+async def test_stream_terminates_on_cancelled(monkeypatch):
+    """The SSE stream must close once a job is cancelled, not poll to the cap."""
+    calls = {"n": 0}
+
+    async def fake_load_public(job_id):
+        calls["n"] += 1
+        status = "running" if calls["n"] == 1 else "cancelled"
+        return {
+            "id": job_id, "status": status, "progress": 0, "total": None,
+            "count": 0, "pages": [], "error": None,
+        }
+
+    async def no_sleep(*_a, **_k):
+        return None
+
+    monkeypatch.setattr(api.jobs, "load_public", fake_load_public)
+    monkeypatch.setattr(api.asyncio, "sleep", no_sleep)  # don't actually wait between polls
+
+    async with _client() as c:
+        r = await c.get("/crawl/jobs/abc/stream")
+    assert r.status_code == 200
+    assert "cancelled" in r.text
+    # Stops right after the cancelled snapshot — a couple of polls, not the
+    # 600-iteration cap (which is what the pre-fix behaviour would do).
+    assert calls["n"] <= 3

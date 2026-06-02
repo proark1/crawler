@@ -6,6 +6,8 @@ import io
 import json
 import logging
 from contextlib import asynccontextmanager
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
 from typing import Literal
 
 import asyncpg
@@ -99,7 +101,28 @@ async def lifespan(app: FastAPI):
         await db.close_pool()
 
 
-app = FastAPI(title="Crawler", version="0.4.0", lifespan=lifespan)
+# Source the OpenAPI version from the single source of truth (pyproject.toml) so
+# /docs, /redoc, and /openapi.json never drift behind it. Prefer installed package
+# metadata; fall back to reading pyproject.toml directly when running from a source
+# checkout (so the fallback can't itself go stale on a version bump).
+def _resolve_version() -> str:
+    try:
+        return _pkg_version("crawler")
+    except PackageNotFoundError:
+        try:
+            import tomllib
+            from pathlib import Path
+
+            pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
+            with pyproject.open("rb") as f:
+                return tomllib.load(f)["project"]["version"]
+        except Exception:  # noqa: BLE001 -- last-resort sentinel, never a real release
+            return "0.0.0+unknown"
+
+
+_API_VERSION = _resolve_version()
+
+app = FastAPI(title="Crawler", version=_API_VERSION, lifespan=lifespan)
 
 app.add_middleware(RateLimitMiddleware)
 app.add_middleware(

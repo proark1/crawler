@@ -37,9 +37,11 @@ class BoundedLRU(Generic[K, V]):
             self._data.popitem(last=False)
 
     def setdefault(self, key: K, default: V) -> V:
-        existing = self.get(key)
-        if existing is not None:
-            return existing
+        # Test membership (not `get() is not None`) so a legitimately-stored
+        # falsy/None value isn't mistaken for "absent" and overwritten.
+        if key in self._data:
+            self._data.move_to_end(key)
+            return self._data[key]
         self.set(key, default)
         return default
 

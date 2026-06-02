@@ -91,6 +91,29 @@ MIGRATIONS: list[tuple[int, str, str]] = [
         CREATE INDEX IF NOT EXISTS pages_blocked_idx ON pages (id) WHERE metadata ? 'block';
         """,
     ),
+    (
+        6,
+        "trigram index for URL ILIKE search fallback",
+        # The search endpoint's `url ILIKE '%q%'` fallback can't use a btree
+        # index (leading wildcard) and degrades to a seq scan on large tables. A
+        # pg_trgm GIN index fixes that. Wrapped in a DO block whose exception
+        # handler skips it if the extension can't be created (no privilege / not
+        # bundled on managed Postgres), so the migration still succeeds — the
+        # query stays correct, just unindexed, exactly as before.
+        """
+        DO $$
+        BEGIN
+            CREATE EXTENSION IF NOT EXISTS pg_trgm;
+            CREATE INDEX IF NOT EXISTS pages_url_trgm_idx ON pages USING gin (url gin_trgm_ops);
+        EXCEPTION WHEN OTHERS THEN
+            -- Best-effort: if the extension can't be created (no privilege / not
+            -- bundled), skip the index rather than failing startup. Search stays
+            -- correct, just unindexed for the ILIKE fallback.
+            RAISE NOTICE 'pg_trgm unavailable; skipping URL trigram index (%)', SQLERRM;
+        END
+        $$;
+        """,
+    ),
 ]
 
 

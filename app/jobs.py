@@ -19,7 +19,7 @@ from typing import Any, Literal
 
 import httpx
 
-from . import db
+from . import db, ssrf
 from .config import settings
 
 log = logging.getLogger("crawler.jobs")
@@ -156,6 +156,14 @@ async def fire_webhook(job: Job) -> None:
     """
     if not job.webhook_url:
         return
+    # Re-validate at delivery time (defence in depth): the URL was checked on
+    # submit, but DNS can change, and this guards jobs restored from the DB that
+    # never went through the submit-time check.
+    try:
+        await ssrf.assert_url_allowed(job.webhook_url)
+    except ssrf.BlockedAddressError as exc:
+        log.warning("webhook for job %s refused (SSRF): %s", job.id, exc)
+        return
     body = json.dumps(job.public(), default=str).encode()
     headers = {"Content-Type": "application/json"}
     if settings.webhook_secret:
@@ -165,7 +173,10 @@ async def fire_webhook(job: Job) -> None:
     attempts = max(1, settings.webhook_retries)
     for attempt in range(attempts):
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
+            # Use the SSRF-pinned client so the POST connects to the exact IP we
+            # validated above — closes the DNS-rebinding (TOCTOU) window a plain
+            # client (which re-resolves at connect time) would leave open.
+            async with ssrf.build_async_client(timeout=httpx.Timeout(10.0)) as client:
                 resp = await client.post(job.webhook_url, content=body, headers=headers)
             if resp.status_code < 500:
                 return  # delivered (2xx/3xx/4xx are all "the receiver got it")

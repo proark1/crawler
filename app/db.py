@@ -198,20 +198,41 @@ async def list_pages(limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
     return [_row_to_dict(r) for r in rows]  # type: ignore[misc]
 
 
-async def iter_all_pages() -> AsyncIterator[dict[str, Any]]:
-    """Stream every page (lightweight columns) for export via a server-side cursor.
+async def iter_all_pages(batch_size: int = 500) -> AsyncIterator[dict[str, Any]]:
+    """Stream every page (lightweight columns) for export, keyset-paginated by id.
 
-    A cursor avoids the O(N^2) cost of deep LIMIT/OFFSET pagination and keeps
-    memory flat regardless of table size.
+    Each batch acquires and releases a pooled connection, so a slow export client
+    can't pin a single connection (and its transaction) for the whole, possibly
+    long, download and starve the pool. Keyset pagination on the primary key
+    avoids the O(N^2) cost of deep LIMIT/OFFSET and keeps memory flat (one batch)
+    regardless of table size. Ordering by id DESC is stable across batches even
+    as rows are inserted/updated concurrently.
     """
-    async with acquire() as conn, conn.transaction():
-        async for row in conn.cursor(
-            "SELECT id, url, final_url, status, title, render_mode, fetched_at "
-            "FROM pages ORDER BY fetched_at DESC"
-        ):
+    cursor_id: int | None = None
+    while True:
+        async with acquire() as conn:
+            if cursor_id is None:
+                rows = await conn.fetch(
+                    "SELECT id, url, final_url, status, title, render_mode, fetched_at "
+                    "FROM pages ORDER BY id DESC LIMIT $1",
+                    batch_size,
+                )
+            else:
+                rows = await conn.fetch(
+                    "SELECT id, url, final_url, status, title, render_mode, fetched_at "
+                    "FROM pages WHERE id < $1 ORDER BY id DESC LIMIT $2",
+                    cursor_id,
+                    batch_size,
+                )
+        if not rows:
+            break
+        for row in rows:
             d = _row_to_dict(row)
             if d is not None:
                 yield d
+        if len(rows) < batch_size:
+            break
+        cursor_id = rows[-1]["id"]
 
 
 async def search_pages(query: str, limit: int = 50) -> list[dict[str, Any]]:

@@ -477,10 +477,14 @@ def _get_extract_pool():  # type: ignore[no-untyped-def]
 
 
 def _shutdown_extract_pool() -> None:
+    # Detach the global first so callers immediately rebuild a fresh pool, then
+    # shut the old one down. shutdown(wait=True) blocks until workers exit, so on
+    # the event loop this must be offloaded (see _extract); it's fine to call
+    # synchronously from the shutdown path (close_browser).
     global _extract_pool
-    if _extract_pool is not None:
-        _extract_pool.shutdown(cancel_futures=True)
-        _extract_pool = None
+    pool, _extract_pool = _extract_pool, None
+    if pool is not None:
+        pool.shutdown(cancel_futures=True)
 
 
 async def _extract(html: str, url: str) -> Extraction:
@@ -493,8 +497,11 @@ async def _extract(html: str, url: str) -> Extraction:
         try:
             loop = asyncio.get_running_loop()
             return await loop.run_in_executor(_get_extract_pool(), _extract_sync, html, url)
-        except Exception:  # noqa: BLE001 -- fall back to threads if the pool dies
-            pass
+        except Exception:  # noqa: BLE001 -- pool is likely broken; drop it so the
+            # next call rebuilds a fresh one instead of re-failing forever, then
+            # fall back to threads for this request. The pool's blocking shutdown
+            # is run off the event loop so it can't freeze concurrent requests.
+            loop.run_in_executor(None, _shutdown_extract_pool)
     return await asyncio.to_thread(_extract_sync, html, url)
 
 
@@ -667,7 +674,13 @@ async def _respect_delay(url: str) -> None:
     if delay <= 0:
         return
     host = urlparse(url).netloc
-    lock = _host_locks.setdefault(host, asyncio.Lock())
+    # get-then-set (cheap on hits) instead of setdefault, which would allocate a
+    # throwaway Lock on every call. Safe without locking: no await between the
+    # check and the set, so it's atomic under asyncio's single-threaded loop.
+    lock = _host_locks.get(host)
+    if lock is None:
+        lock = asyncio.Lock()
+        _host_locks.set(host, lock)
     async with lock:
         last = _host_last_hit.get(host)
         now = time.monotonic()
@@ -1281,14 +1294,14 @@ async def crawl_site(
     max_depth: int = 1,
     max_pages: int = 10,
     same_host_only: bool = True,
-    concurrency: int | None = None,
+    workers: int | None = None,
     cache_lookup: CacheLookup | None = None,
     on_page_crawled: Callable[[CrawlResult], None] | None = None,
     use_sitemap: bool = False,
 ) -> list[CrawlResult]:
     max_depth = min(max_depth, settings.max_depth_hard_limit)
     max_pages = min(max_pages, settings.max_pages_hard_limit)
-    workers = concurrency or settings.crawl_concurrency
+    num_workers = workers or settings.crawl_concurrency
 
     start = _normalize(start_url)
     seen: set[str] = {start}
@@ -1299,7 +1312,12 @@ async def crawl_site(
     # Only when multi-page crawling is enabled (max_depth == 0 = start URL only).
     if use_sitemap and settings.use_sitemap and max_depth > 0:
         try:
-            for loc in await discover_sitemap_urls(start):
+            # Cap discovery to the page budget: seeding thousands of URLs we'll
+            # never fetch (the workers stop at max_pages) just bloats the queue
+            # and the `seen` set. In-page links fill any remaining budget.
+            for loc in await discover_sitemap_urls(start, limit=max_pages):
+                if len(seen) >= max_pages:
+                    break
                 norm = _normalize(loc)
                 if norm in seen:
                     continue
@@ -1381,7 +1399,7 @@ async def crawl_site(
             finally:
                 queue.task_done()
 
-    tasks = [asyncio.create_task(worker()) for _ in range(max(1, workers))]
+    tasks = [asyncio.create_task(worker()) for _ in range(max(1, num_workers))]
     try:
         # queue.join() unblocks exactly when every enqueued URL has been processed,
         # which is race-free regardless of how links fan out across workers.

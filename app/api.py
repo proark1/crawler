@@ -6,6 +6,7 @@ import io
 import json
 import logging
 from contextlib import asynccontextmanager
+from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from typing import Literal
 
 import asyncpg
@@ -99,7 +100,14 @@ async def lifespan(app: FastAPI):
         await db.close_pool()
 
 
-app = FastAPI(title="Crawler", version="0.4.0", lifespan=lifespan)
+# Source the OpenAPI version from package metadata so /docs, /redoc, and
+# /openapi.json never drift behind the version declared in pyproject.toml.
+try:
+    _API_VERSION = _pkg_version("crawler")
+except PackageNotFoundError:  # not installed (e.g. running from a source checkout)
+    _API_VERSION = "0.5.0"
+
+app = FastAPI(title="Crawler", version=_API_VERSION, lifespan=lifespan)
 
 app.add_middleware(RateLimitMiddleware)
 app.add_middleware(

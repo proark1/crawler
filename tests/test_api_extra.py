@@ -140,8 +140,10 @@ async def test_ready_is_exempt_from_rate_limit(monkeypatch):
     monkeypatch.setattr(api.settings, "rate_limit_per_minute", 1)
     async with _client() as c:
         for _ in range(3):  # well past the limit of 1
-            r = await c.get("/ready")
-            assert r.status_code == 200
+            assert (await c.get("/ready")).status_code == 200
+            # Trailing slash must be exempt too (orchestrators may add one); the
+            # limiter would otherwise 429 the 2nd hit. Anything but 429 == exempt.
+            assert (await c.get("/ready/")).status_code != 429
 
 
 @pytest.mark.asyncio

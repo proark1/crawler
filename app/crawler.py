@@ -477,10 +477,14 @@ def _get_extract_pool():  # type: ignore[no-untyped-def]
 
 
 def _shutdown_extract_pool() -> None:
+    # Detach the global first so callers immediately rebuild a fresh pool, then
+    # shut the old one down. shutdown(wait=True) blocks until workers exit, so on
+    # the event loop this must be offloaded (see _extract); it's fine to call
+    # synchronously from the shutdown path (close_browser).
     global _extract_pool
-    if _extract_pool is not None:
-        _extract_pool.shutdown(cancel_futures=True)
-        _extract_pool = None
+    pool, _extract_pool = _extract_pool, None
+    if pool is not None:
+        pool.shutdown(cancel_futures=True)
 
 
 async def _extract(html: str, url: str) -> Extraction:
@@ -495,8 +499,9 @@ async def _extract(html: str, url: str) -> Extraction:
             return await loop.run_in_executor(_get_extract_pool(), _extract_sync, html, url)
         except Exception:  # noqa: BLE001 -- pool is likely broken; drop it so the
             # next call rebuilds a fresh one instead of re-failing forever, then
-            # fall back to threads for this request.
-            _shutdown_extract_pool()
+            # fall back to threads for this request. The pool's blocking shutdown
+            # is run off the event loop so it can't freeze concurrent requests.
+            loop.run_in_executor(None, _shutdown_extract_pool)
     return await asyncio.to_thread(_extract_sync, html, url)
 
 

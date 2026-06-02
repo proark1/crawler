@@ -55,7 +55,7 @@ def _job(url="https://hook.example/cb"):
 
 @pytest.mark.asyncio
 async def test_webhook_signed_when_secret_set(monkeypatch):
-    monkeypatch.setattr(jobs.httpx, "AsyncClient", _FakeClient)
+    monkeypatch.setattr(jobs.ssrf, "build_async_client", _FakeClient)
     monkeypatch.setattr(settings, "webhook_secret", "s3cret")
     await jobs.fire_webhook(_job())
     assert len(_FakeClient.calls) == 1
@@ -66,7 +66,7 @@ async def test_webhook_signed_when_secret_set(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_webhook_retries_on_5xx(monkeypatch):
-    monkeypatch.setattr(jobs.httpx, "AsyncClient", _FakeClient)
+    monkeypatch.setattr(jobs.ssrf, "build_async_client", _FakeClient)
     monkeypatch.setattr(settings, "webhook_secret", "")
     monkeypatch.setattr(settings, "webhook_retries", 3)
     monkeypatch.setattr(jobs.asyncio, "sleep", lambda *_a, **_k: _noop())
@@ -77,7 +77,7 @@ async def test_webhook_retries_on_5xx(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_webhook_no_url_is_noop(monkeypatch):
-    monkeypatch.setattr(jobs.httpx, "AsyncClient", _FakeClient)
+    monkeypatch.setattr(jobs.ssrf, "build_async_client", _FakeClient)
     j = jobs.Job(id="j2", status="done", webhook_url=None)
     await jobs.fire_webhook(j)
     assert _FakeClient.calls == []
@@ -86,7 +86,7 @@ async def test_webhook_no_url_is_noop(monkeypatch):
 @pytest.mark.asyncio
 async def test_webhook_refused_for_private_address(monkeypatch):
     """A webhook pointing at an internal address must never be contacted (SSRF)."""
-    monkeypatch.setattr(jobs.httpx, "AsyncClient", _FakeClient)
+    monkeypatch.setattr(jobs.ssrf, "build_async_client", _FakeClient)
     monkeypatch.setattr(settings, "block_private_addresses", True)
     monkeypatch.setattr(settings, "ssrf_allowlist", "")  # don't exempt anything
     j = jobs.Job(id="j3", status="done", webhook_url="http://127.0.0.1:9/hook")

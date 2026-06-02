@@ -35,7 +35,8 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         limit = settings.rate_limit_per_minute
         # Never rate-limit infra probes/scrapes: orchestrators hit /health and
         # /ready frequently from one source, and Prometheus polls /metrics.
-        if limit <= 0 or request.url.path in ("/health", "/ready", "/metrics"):
+        # rstrip the path so a trailing slash (/ready/) is still exempted.
+        if limit <= 0 or request.url.path.rstrip("/") in ("/health", "/ready", "/metrics"):
             return await call_next(request)
 
         now = time.monotonic()

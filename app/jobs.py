@@ -173,7 +173,10 @@ async def fire_webhook(job: Job) -> None:
     attempts = max(1, settings.webhook_retries)
     for attempt in range(attempts):
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
+            # Use the SSRF-pinned client so the POST connects to the exact IP we
+            # validated above — closes the DNS-rebinding (TOCTOU) window a plain
+            # client (which re-resolves at connect time) would leave open.
+            async with ssrf.build_async_client(timeout=httpx.Timeout(10.0)) as client:
                 resp = await client.post(job.webhook_url, content=body, headers=headers)
             if resp.status_code < 500:
                 return  # delivered (2xx/3xx/4xx are all "the receiver got it")
